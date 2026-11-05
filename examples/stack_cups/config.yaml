@@ -1,0 +1,27 @@
+# 多个一次性纸杯夹取与同心套杯堆叠默认配置文件
+# 运行模式: sim (默认纯 MuJoCo 仿真) | dry-run | sdk-sim | real
+mode: sim
+
+# 是否以无头模式运行 MuJoCo 仿真/数字孪生预演:
+# false (默认): 打开 MuJoCo 3D 可视化窗口
+# true: 无头模式后台运行（不弹出 3D 窗口）
+headless: false
+
+robot:
+  ip: "192.168.1.60"
+  calibration: "../ufactory_mujoco/calibrations/xarm6_kinematics_L56A01.yaml"
+
+camera:
+  handeye: "../camera_tool/result/eye_in_hand.yaml"
+
+task:
+  # 参与夹取-堆叠的纸杯数量 (支持 2 或 3，默认 2)
+  num_cups: 2
+  # 目标堆叠位置 [x_m, y_m]（同时对 sim 与 real/sdk-sim/dry-run 生效；若注释掉则真机自动优选净空点）
+  target_xy: [0.30, 0.20]
+  # 真机完成叠杯回到观测位后，是否自动通过 Gemini 305 拍照进行闭环确认
+  post_verify: true
+  save_vis: "build/stack_cups/real_detection.png"
+  save_after_vis: "build/stack_cups/real_after_stack.png"
+  # 结构化运行报告保存路径 (可选)
+  report: "build/stack_cups/sim_report.json"

@@ -1,0 +1,16 @@
+# 一次性纸杯夹取与竖放 (MuJoCo 仿真 & Sim-to-Real) 配置文件
+mode: sim
+headless: false  # false: 默认弹出 MuJoCo 3D 可视化窗口预演；true: 无头模式后台运行
+
+robot:
+  ip: "192.168.1.60"
+  calibration: "../ufactory_mujoco/calibrations/xarm6_kinematics_L56A01.yaml"
+
+camera:
+  handeye: "../camera_tool/result/eye_in_hand.yaml"
+
+task:
+  post_verify: true  # 真机完成竖放回到观测位后，自动通过 Gemini 305 拍照进行闭环确认
+  save_vis: "build/pick_cup/real_detection.png"
+  save_after_vis: "build/pick_cup/real_after_place.png"
+

@@ -1,0 +1,307 @@
+<mujoco model="xarm6 screw nut threading">
+  <include file="../../../ufactory_mujoco/models/xarm6_with_gripper/xarm6_with_gripper.xml" />
+  <option timestep="0.001" integrator="implicitfast" />
+  <statistic center="0.32 -0.05 0.18" extent="0.9" />
+  <visual>
+    <global azimuth="-135" elevation="-24" offwidth="1280" offheight="720" />
+    <headlight ambient="0.26 0.27 0.29" diffuse="0.42 0.44 0.46" specular="0.95 0.97 1.00" />
+    <quality shadowsize="4096" />
+  </visual>
+
+  <asset>
+    <texture name="chrome_tex" type="2d" file="assets/chrome_steel.png" />
+    <mesh name="screw" file="screw.obj" />
+    <mesh name="nut" file="nut.obj" />
+    <material name="screw_mat" texture="chrome_tex" rgba="0.80 0.83 0.87 1.0" specular="1.0" shininess="0.82" reflectance="0.35" />
+    <material name="nut_mat" texture="chrome_tex" rgba="0.78 0.82 0.86 1.0" specular="1.0" shininess="0.82" reflectance="0.35" />
+    <material name="table_mat" rgba="0.54 0.56 0.58 1" specular="0.08" shininess="0.15" />
+  </asset>
+
+  <default>
+    <!-- Priority 1 applies low metal-to-metal friction between the 12-turn helical screw thread
+         and internal nut follower teeth for smooth coaxial engagement and self-locking, while
+         Gripper G2 fingers and the tabletop use priority 2. -->
+    <default class="screw_col">
+      <geom group="3" priority="1" condim="4" friction="0.10 0.002 0.0001"
+            solref="0.003 1" solimp="0.99 0.999 0.0001" rgba="0.2 0.6 0.9 0.45" />
+    </default>
+    <default class="nut_col">
+      <geom group="3" priority="1" condim="4" friction="0.10 0.002 0.0001"
+            solref="0.003 1" solimp="0.99 0.999 0.0001" rgba="0.2 0.8 0.5 0.45" />
+      <default class="nut_flange">
+        <geom type="box" size="0.00375 0.00167 0.00190" mass="0.000780" />
+      </default>
+      <default class="nut_body">
+        <geom type="box" size="0.00183 0.00127 0.00535" mass="0.000670" />
+      </default>
+    </default>
+  </default>
+
+  <worldbody>
+    <light name="key_light" pos="0.55 -0.45 0.85" dir="-0.25 0.35 -0.90" directional="false"
+           cutoff="45" exponent="6" diffuse="0.50 0.52 0.55" specular="1.00 1.00 1.00" castshadow="true" />
+    <light name="rim_light" pos="0.10 0.35 0.55" dir="0.55 -0.65 -0.52" directional="false"
+           diffuse="0.28 0.31 0.36" specular="0.90 0.95 1.00" castshadow="false" />
+    <light name="fill_light" pos="0.65 0.25 0.35" dir="-0.65 -0.55 -0.52" directional="false"
+           diffuse="0.22 0.23 0.25" specular="0.80 0.82 0.86" castshadow="false" />
+    <geom name="table" type="plane" size="1 1 0.01" material="table_mat" priority="2" condim="4"
+          friction="1.5 0.015 0.002" solref="0.003 1" solimp="0.99 0.999 0.0001"
+          rgba="0.54 0.56 0.58 1" />
+    <geom name="glue_pad" type="cylinder" size="0.013 0.0003" pos="0.3560 -0.1028 0.0003"
+          rgba="0.15 0.68 0.42 0.55" contype="0" conaffinity="0" />
+
+    <!-- Upright M12x31 screw (total length 45mm, head 20x14mm, 12 helical ridges, mass 56.5g) glued to tabletop -->
+    <body name="screw" pos="0.3560 -0.1028 0">
+      <geom name="screw_visual" type="mesh" mesh="screw" material="screw_mat" group="1" contype="0" conaffinity="0" mass="0" />
+      <geom name="screw_head" class="screw_col" type="cylinder" pos="0 0 0.00700" size="0.01000 0.00700" mass="0.033850"/>
+      <geom name="screw_shaft" class="screw_col" type="cylinder" pos="0 0 0.02850" size="0.00490 0.01450" mass="0.021350"/>
+      <geom name="screw_tip" class="screw_col" type="cylinder" pos="0 0 0.04420" size="0.00470 0.00080" mass="0.001300"/>
+      <geom name="screw_thread_000" class="screw_col" type="capsule" size="0.00060" fromto="0.00540 0.00000 0.01480 0.00499 0.00207 0.01495" mass="0"/>
+      <geom name="screw_thread_001" class="screw_col" type="capsule" size="0.00060" fromto="0.00499 0.00207 0.01495 0.00382 0.00382 0.01510" mass="0"/>
+      <geom name="screw_thread_002" class="screw_col" type="capsule" size="0.00060" fromto="0.00382 0.00382 0.01510 0.00207 0.00499 0.01525" mass="0"/>
+      <geom name="screw_thread_003" class="screw_col" type="capsule" size="0.00060" fromto="0.00207 0.00499 0.01525 0.00000 0.00540 0.01540" mass="0"/>
+      <geom name="screw_thread_004" class="screw_col" type="capsule" size="0.00060" fromto="0.00000 0.00540 0.01540 -0.00207 0.00499 0.01555" mass="0"/>
+      <geom name="screw_thread_005" class="screw_col" type="capsule" size="0.00060" fromto="-0.00207 0.00499 0.01555 -0.00382 0.00382 0.01570" mass="0"/>
+      <geom name="screw_thread_006" class="screw_col" type="capsule" size="0.00060" fromto="-0.00382 0.00382 0.01570 -0.00499 0.00207 0.01585" mass="0"/>
+      <geom name="screw_thread_007" class="screw_col" type="capsule" size="0.00060" fromto="-0.00499 0.00207 0.01585 -0.00540 0.00000 0.01600" mass="0"/>
+      <geom name="screw_thread_008" class="screw_col" type="capsule" size="0.00060" fromto="-0.00540 0.00000 0.01600 -0.00499 -0.00207 0.01615" mass="0"/>
+      <geom name="screw_thread_009" class="screw_col" type="capsule" size="0.00060" fromto="-0.00499 -0.00207 0.01615 -0.00382 -0.00382 0.01630" mass="0"/>
+      <geom name="screw_thread_010" class="screw_col" type="capsule" size="0.00060" fromto="-0.00382 -0.00382 0.01630 -0.00207 -0.00499 0.01645" mass="0"/>
+      <geom name="screw_thread_011" class="screw_col" type="capsule" size="0.00060" fromto="-0.00207 -0.00499 0.01645 -0.00000 -0.00540 0.01660" mass="0"/>
+      <geom name="screw_thread_012" class="screw_col" type="capsule" size="0.00060" fromto="-0.00000 -0.00540 0.01660 0.00207 -0.00499 0.01675" mass="0"/>
+      <geom name="screw_thread_013" class="screw_col" type="capsule" size="0.00060" fromto="0.00207 -0.00499 0.01675 0.00382 -0.00382 0.01690" mass="0"/>
+      <geom name="screw_thread_014" class="screw_col" type="capsule" size="0.00060" fromto="0.00382 -0.00382 0.01690 0.00499 -0.00207 0.01705" mass="0"/>
+      <geom name="screw_thread_015" class="screw_col" type="capsule" size="0.00060" fromto="0.00499 -0.00207 0.01705 0.00540 -0.00000 0.01720" mass="0"/>
+      <geom name="screw_thread_016" class="screw_col" type="capsule" size="0.00060" fromto="0.00540 -0.00000 0.01720 0.00499 0.00207 0.01735" mass="0"/>
+      <geom name="screw_thread_017" class="screw_col" type="capsule" size="0.00060" fromto="0.00499 0.00207 0.01735 0.00382 0.00382 0.01750" mass="0"/>
+      <geom name="screw_thread_018" class="screw_col" type="capsule" size="0.00060" fromto="0.00382 0.00382 0.01750 0.00207 0.00499 0.01765" mass="0"/>
+      <geom name="screw_thread_019" class="screw_col" type="capsule" size="0.00060" fromto="0.00207 0.00499 0.01765 0.00000 0.00540 0.01780" mass="0"/>
+      <geom name="screw_thread_020" class="screw_col" type="capsule" size="0.00060" fromto="0.00000 0.00540 0.01780 -0.00207 0.00499 0.01795" mass="0"/>
+      <geom name="screw_thread_021" class="screw_col" type="capsule" size="0.00060" fromto="-0.00207 0.00499 0.01795 -0.00382 0.00382 0.01810" mass="0"/>
+      <geom name="screw_thread_022" class="screw_col" type="capsule" size="0.00060" fromto="-0.00382 0.00382 0.01810 -0.00499 0.00207 0.01825" mass="0"/>
+      <geom name="screw_thread_023" class="screw_col" type="capsule" size="0.00060" fromto="-0.00499 0.00207 0.01825 -0.00540 0.00000 0.01840" mass="0"/>
+      <geom name="screw_thread_024" class="screw_col" type="capsule" size="0.00060" fromto="-0.00540 0.00000 0.01840 -0.00499 -0.00207 0.01855" mass="0"/>
+      <geom name="screw_thread_025" class="screw_col" type="capsule" size="0.00060" fromto="-0.00499 -0.00207 0.01855 -0.00382 -0.00382 0.01870" mass="0"/>
+      <geom name="screw_thread_026" class="screw_col" type="capsule" size="0.00060" fromto="-0.00382 -0.00382 0.01870 -0.00207 -0.00499 0.01885" mass="0"/>
+      <geom name="screw_thread_027" class="screw_col" type="capsule" size="0.00060" fromto="-0.00207 -0.00499 0.01885 -0.00000 -0.00540 0.01900" mass="0"/>
+      <geom name="screw_thread_028" class="screw_col" type="capsule" size="0.00060" fromto="-0.00000 -0.00540 0.01900 0.00207 -0.00499 0.01915" mass="0"/>
+      <geom name="screw_thread_029" class="screw_col" type="capsule" size="0.00060" fromto="0.00207 -0.00499 0.01915 0.00382 -0.00382 0.01930" mass="0"/>
+      <geom name="screw_thread_030" class="screw_col" type="capsule" size="0.00060" fromto="0.00382 -0.00382 0.01930 0.00499 -0.00207 0.01945" mass="0"/>
+      <geom name="screw_thread_031" class="screw_col" type="capsule" size="0.00060" fromto="0.00499 -0.00207 0.01945 0.00540 -0.00000 0.01960" mass="0"/>
+      <geom name="screw_thread_032" class="screw_col" type="capsule" size="0.00060" fromto="0.00540 -0.00000 0.01960 0.00499 0.00207 0.01975" mass="0"/>
+      <geom name="screw_thread_033" class="screw_col" type="capsule" size="0.00060" fromto="0.00499 0.00207 0.01975 0.00382 0.00382 0.01990" mass="0"/>
+      <geom name="screw_thread_034" class="screw_col" type="capsule" size="0.00060" fromto="0.00382 0.00382 0.01990 0.00207 0.00499 0.02005" mass="0"/>
+      <geom name="screw_thread_035" class="screw_col" type="capsule" size="0.00060" fromto="0.00207 0.00499 0.02005 0.00000 0.00540 0.02020" mass="0"/>
+      <geom name="screw_thread_036" class="screw_col" type="capsule" size="0.00060" fromto="0.00000 0.00540 0.02020 -0.00207 0.00499 0.02035" mass="0"/>
+      <geom name="screw_thread_037" class="screw_col" type="capsule" size="0.00060" fromto="-0.00207 0.00499 0.02035 -0.00382 0.00382 0.02050" mass="0"/>
+      <geom name="screw_thread_038" class="screw_col" type="capsule" size="0.00060" fromto="-0.00382 0.00382 0.02050 -0.00499 0.00207 0.02065" mass="0"/>
+      <geom name="screw_thread_039" class="screw_col" type="capsule" size="0.00060" fromto="-0.00499 0.00207 0.02065 -0.00540 0.00000 0.02080" mass="0"/>
+      <geom name="screw_thread_040" class="screw_col" type="capsule" size="0.00060" fromto="-0.00540 0.00000 0.02080 -0.00499 -0.00207 0.02095" mass="0"/>
+      <geom name="screw_thread_041" class="screw_col" type="capsule" size="0.00060" fromto="-0.00499 -0.00207 0.02095 -0.00382 -0.00382 0.02110" mass="0"/>
+      <geom name="screw_thread_042" class="screw_col" type="capsule" size="0.00060" fromto="-0.00382 -0.00382 0.02110 -0.00207 -0.00499 0.02125" mass="0"/>
+      <geom name="screw_thread_043" class="screw_col" type="capsule" size="0.00060" fromto="-0.00207 -0.00499 0.02125 -0.00000 -0.00540 0.02140" mass="0"/>
+      <geom name="screw_thread_044" class="screw_col" type="capsule" size="0.00060" fromto="-0.00000 -0.00540 0.02140 0.00207 -0.00499 0.02155" mass="0"/>
+      <geom name="screw_thread_045" class="screw_col" type="capsule" size="0.00060" fromto="0.00207 -0.00499 0.02155 0.00382 -0.00382 0.02170" mass="0"/>
+      <geom name="screw_thread_046" class="screw_col" type="capsule" size="0.00060" fromto="0.00382 -0.00382 0.02170 0.00499 -0.00207 0.02185" mass="0"/>
+      <geom name="screw_thread_047" class="screw_col" type="capsule" size="0.00060" fromto="0.00499 -0.00207 0.02185 0.00540 -0.00000 0.02200" mass="0"/>
+      <geom name="screw_thread_048" class="screw_col" type="capsule" size="0.00060" fromto="0.00540 -0.00000 0.02200 0.00499 0.00207 0.02215" mass="0"/>
+      <geom name="screw_thread_049" class="screw_col" type="capsule" size="0.00060" fromto="0.00499 0.00207 0.02215 0.00382 0.00382 0.02230" mass="0"/>
+      <geom name="screw_thread_050" class="screw_col" type="capsule" size="0.00060" fromto="0.00382 0.00382 0.02230 0.00207 0.00499 0.02245" mass="0"/>
+      <geom name="screw_thread_051" class="screw_col" type="capsule" size="0.00060" fromto="0.00207 0.00499 0.02245 -0.00000 0.00540 0.02260" mass="0"/>
+      <geom name="screw_thread_052" class="screw_col" type="capsule" size="0.00060" fromto="-0.00000 0.00540 0.02260 -0.00207 0.00499 0.02275" mass="0"/>
+      <geom name="screw_thread_053" class="screw_col" type="capsule" size="0.00060" fromto="-0.00207 0.00499 0.02275 -0.00382 0.00382 0.02290" mass="0"/>
+      <geom name="screw_thread_054" class="screw_col" type="capsule" size="0.00060" fromto="-0.00382 0.00382 0.02290 -0.00499 0.00207 0.02305" mass="0"/>
+      <geom name="screw_thread_055" class="screw_col" type="capsule" size="0.00060" fromto="-0.00499 0.00207 0.02305 -0.00540 0.00000 0.02320" mass="0"/>
+      <geom name="screw_thread_056" class="screw_col" type="capsule" size="0.00060" fromto="-0.00540 0.00000 0.02320 -0.00499 -0.00207 0.02335" mass="0"/>
+      <geom name="screw_thread_057" class="screw_col" type="capsule" size="0.00060" fromto="-0.00499 -0.00207 0.02335 -0.00382 -0.00382 0.02350" mass="0"/>
+      <geom name="screw_thread_058" class="screw_col" type="capsule" size="0.00060" fromto="-0.00382 -0.00382 0.02350 -0.00207 -0.00499 0.02365" mass="0"/>
+      <geom name="screw_thread_059" class="screw_col" type="capsule" size="0.00060" fromto="-0.00207 -0.00499 0.02365 -0.00000 -0.00540 0.02380" mass="0"/>
+      <geom name="screw_thread_060" class="screw_col" type="capsule" size="0.00060" fromto="-0.00000 -0.00540 0.02380 0.00207 -0.00499 0.02395" mass="0"/>
+      <geom name="screw_thread_061" class="screw_col" type="capsule" size="0.00060" fromto="0.00207 -0.00499 0.02395 0.00382 -0.00382 0.02410" mass="0"/>
+      <geom name="screw_thread_062" class="screw_col" type="capsule" size="0.00060" fromto="0.00382 -0.00382 0.02410 0.00499 -0.00207 0.02425" mass="0"/>
+      <geom name="screw_thread_063" class="screw_col" type="capsule" size="0.00060" fromto="0.00499 -0.00207 0.02425 0.00540 -0.00000 0.02440" mass="0"/>
+      <geom name="screw_thread_064" class="screw_col" type="capsule" size="0.00060" fromto="0.00540 -0.00000 0.02440 0.00499 0.00207 0.02455" mass="0"/>
+      <geom name="screw_thread_065" class="screw_col" type="capsule" size="0.00060" fromto="0.00499 0.00207 0.02455 0.00382 0.00382 0.02470" mass="0"/>
+      <geom name="screw_thread_066" class="screw_col" type="capsule" size="0.00060" fromto="0.00382 0.00382 0.02470 0.00207 0.00499 0.02485" mass="0"/>
+      <geom name="screw_thread_067" class="screw_col" type="capsule" size="0.00060" fromto="0.00207 0.00499 0.02485 -0.00000 0.00540 0.02500" mass="0"/>
+      <geom name="screw_thread_068" class="screw_col" type="capsule" size="0.00060" fromto="-0.00000 0.00540 0.02500 -0.00207 0.00499 0.02515" mass="0"/>
+      <geom name="screw_thread_069" class="screw_col" type="capsule" size="0.00060" fromto="-0.00207 0.00499 0.02515 -0.00382 0.00382 0.02530" mass="0"/>
+      <geom name="screw_thread_070" class="screw_col" type="capsule" size="0.00060" fromto="-0.00382 0.00382 0.02530 -0.00499 0.00207 0.02545" mass="0"/>
+      <geom name="screw_thread_071" class="screw_col" type="capsule" size="0.00060" fromto="-0.00499 0.00207 0.02545 -0.00540 0.00000 0.02560" mass="0"/>
+      <geom name="screw_thread_072" class="screw_col" type="capsule" size="0.00060" fromto="-0.00540 0.00000 0.02560 -0.00499 -0.00207 0.02575" mass="0"/>
+      <geom name="screw_thread_073" class="screw_col" type="capsule" size="0.00060" fromto="-0.00499 -0.00207 0.02575 -0.00382 -0.00382 0.02590" mass="0"/>
+      <geom name="screw_thread_074" class="screw_col" type="capsule" size="0.00060" fromto="-0.00382 -0.00382 0.02590 -0.00207 -0.00499 0.02605" mass="0"/>
+      <geom name="screw_thread_075" class="screw_col" type="capsule" size="0.00060" fromto="-0.00207 -0.00499 0.02605 -0.00000 -0.00540 0.02620" mass="0"/>
+      <geom name="screw_thread_076" class="screw_col" type="capsule" size="0.00060" fromto="-0.00000 -0.00540 0.02620 0.00207 -0.00499 0.02635" mass="0"/>
+      <geom name="screw_thread_077" class="screw_col" type="capsule" size="0.00060" fromto="0.00207 -0.00499 0.02635 0.00382 -0.00382 0.02650" mass="0"/>
+      <geom name="screw_thread_078" class="screw_col" type="capsule" size="0.00060" fromto="0.00382 -0.00382 0.02650 0.00499 -0.00207 0.02665" mass="0"/>
+      <geom name="screw_thread_079" class="screw_col" type="capsule" size="0.00060" fromto="0.00499 -0.00207 0.02665 0.00540 -0.00000 0.02680" mass="0"/>
+      <geom name="screw_thread_080" class="screw_col" type="capsule" size="0.00060" fromto="0.00540 -0.00000 0.02680 0.00499 0.00207 0.02695" mass="0"/>
+      <geom name="screw_thread_081" class="screw_col" type="capsule" size="0.00060" fromto="0.00499 0.00207 0.02695 0.00382 0.00382 0.02710" mass="0"/>
+      <geom name="screw_thread_082" class="screw_col" type="capsule" size="0.00060" fromto="0.00382 0.00382 0.02710 0.00207 0.00499 0.02725" mass="0"/>
+      <geom name="screw_thread_083" class="screw_col" type="capsule" size="0.00060" fromto="0.00207 0.00499 0.02725 -0.00000 0.00540 0.02740" mass="0"/>
+      <geom name="screw_thread_084" class="screw_col" type="capsule" size="0.00060" fromto="-0.00000 0.00540 0.02740 -0.00207 0.00499 0.02755" mass="0"/>
+      <geom name="screw_thread_085" class="screw_col" type="capsule" size="0.00060" fromto="-0.00207 0.00499 0.02755 -0.00382 0.00382 0.02770" mass="0"/>
+      <geom name="screw_thread_086" class="screw_col" type="capsule" size="0.00060" fromto="-0.00382 0.00382 0.02770 -0.00499 0.00207 0.02785" mass="0"/>
+      <geom name="screw_thread_087" class="screw_col" type="capsule" size="0.00060" fromto="-0.00499 0.00207 0.02785 -0.00540 0.00000 0.02800" mass="0"/>
+      <geom name="screw_thread_088" class="screw_col" type="capsule" size="0.00060" fromto="-0.00540 0.00000 0.02800 -0.00499 -0.00207 0.02815" mass="0"/>
+      <geom name="screw_thread_089" class="screw_col" type="capsule" size="0.00060" fromto="-0.00499 -0.00207 0.02815 -0.00382 -0.00382 0.02830" mass="0"/>
+      <geom name="screw_thread_090" class="screw_col" type="capsule" size="0.00060" fromto="-0.00382 -0.00382 0.02830 -0.00207 -0.00499 0.02845" mass="0"/>
+      <geom name="screw_thread_091" class="screw_col" type="capsule" size="0.00060" fromto="-0.00207 -0.00499 0.02845 -0.00000 -0.00540 0.02860" mass="0"/>
+      <geom name="screw_thread_092" class="screw_col" type="capsule" size="0.00060" fromto="-0.00000 -0.00540 0.02860 0.00207 -0.00499 0.02875" mass="0"/>
+      <geom name="screw_thread_093" class="screw_col" type="capsule" size="0.00060" fromto="0.00207 -0.00499 0.02875 0.00382 -0.00382 0.02890" mass="0"/>
+      <geom name="screw_thread_094" class="screw_col" type="capsule" size="0.00060" fromto="0.00382 -0.00382 0.02890 0.00499 -0.00207 0.02905" mass="0"/>
+      <geom name="screw_thread_095" class="screw_col" type="capsule" size="0.00060" fromto="0.00499 -0.00207 0.02905 0.00540 -0.00000 0.02920" mass="0"/>
+      <geom name="screw_thread_096" class="screw_col" type="capsule" size="0.00060" fromto="0.00540 -0.00000 0.02920 0.00499 0.00207 0.02935" mass="0"/>
+      <geom name="screw_thread_097" class="screw_col" type="capsule" size="0.00060" fromto="0.00499 0.00207 0.02935 0.00382 0.00382 0.02950" mass="0"/>
+      <geom name="screw_thread_098" class="screw_col" type="capsule" size="0.00060" fromto="0.00382 0.00382 0.02950 0.00207 0.00499 0.02965" mass="0"/>
+      <geom name="screw_thread_099" class="screw_col" type="capsule" size="0.00060" fromto="0.00207 0.00499 0.02965 -0.00000 0.00540 0.02980" mass="0"/>
+      <geom name="screw_thread_100" class="screw_col" type="capsule" size="0.00060" fromto="-0.00000 0.00540 0.02980 -0.00207 0.00499 0.02995" mass="0"/>
+      <geom name="screw_thread_101" class="screw_col" type="capsule" size="0.00060" fromto="-0.00207 0.00499 0.02995 -0.00382 0.00382 0.03010" mass="0"/>
+      <geom name="screw_thread_102" class="screw_col" type="capsule" size="0.00060" fromto="-0.00382 0.00382 0.03010 -0.00499 0.00207 0.03025" mass="0"/>
+      <geom name="screw_thread_103" class="screw_col" type="capsule" size="0.00060" fromto="-0.00499 0.00207 0.03025 -0.00540 -0.00000 0.03040" mass="0"/>
+      <geom name="screw_thread_104" class="screw_col" type="capsule" size="0.00060" fromto="-0.00540 -0.00000 0.03040 -0.00499 -0.00207 0.03055" mass="0"/>
+      <geom name="screw_thread_105" class="screw_col" type="capsule" size="0.00060" fromto="-0.00499 -0.00207 0.03055 -0.00382 -0.00382 0.03070" mass="0"/>
+      <geom name="screw_thread_106" class="screw_col" type="capsule" size="0.00060" fromto="-0.00382 -0.00382 0.03070 -0.00207 -0.00499 0.03085" mass="0"/>
+      <geom name="screw_thread_107" class="screw_col" type="capsule" size="0.00060" fromto="-0.00207 -0.00499 0.03085 -0.00000 -0.00540 0.03100" mass="0"/>
+      <geom name="screw_thread_108" class="screw_col" type="capsule" size="0.00060" fromto="-0.00000 -0.00540 0.03100 0.00207 -0.00499 0.03115" mass="0"/>
+      <geom name="screw_thread_109" class="screw_col" type="capsule" size="0.00060" fromto="0.00207 -0.00499 0.03115 0.00382 -0.00382 0.03130" mass="0"/>
+      <geom name="screw_thread_110" class="screw_col" type="capsule" size="0.00060" fromto="0.00382 -0.00382 0.03130 0.00499 -0.00207 0.03145" mass="0"/>
+      <geom name="screw_thread_111" class="screw_col" type="capsule" size="0.00060" fromto="0.00499 -0.00207 0.03145 0.00540 -0.00000 0.03160" mass="0"/>
+      <geom name="screw_thread_112" class="screw_col" type="capsule" size="0.00060" fromto="0.00540 -0.00000 0.03160 0.00499 0.00207 0.03175" mass="0"/>
+      <geom name="screw_thread_113" class="screw_col" type="capsule" size="0.00060" fromto="0.00499 0.00207 0.03175 0.00382 0.00382 0.03190" mass="0"/>
+      <geom name="screw_thread_114" class="screw_col" type="capsule" size="0.00060" fromto="0.00382 0.00382 0.03190 0.00207 0.00499 0.03205" mass="0"/>
+      <geom name="screw_thread_115" class="screw_col" type="capsule" size="0.00060" fromto="0.00207 0.00499 0.03205 -0.00000 0.00540 0.03220" mass="0"/>
+      <geom name="screw_thread_116" class="screw_col" type="capsule" size="0.00060" fromto="-0.00000 0.00540 0.03220 -0.00207 0.00499 0.03235" mass="0"/>
+      <geom name="screw_thread_117" class="screw_col" type="capsule" size="0.00060" fromto="-0.00207 0.00499 0.03235 -0.00382 0.00382 0.03250" mass="0"/>
+      <geom name="screw_thread_118" class="screw_col" type="capsule" size="0.00060" fromto="-0.00382 0.00382 0.03250 -0.00499 0.00207 0.03265" mass="0"/>
+      <geom name="screw_thread_119" class="screw_col" type="capsule" size="0.00060" fromto="-0.00499 0.00207 0.03265 -0.00540 0.00000 0.03280" mass="0"/>
+      <geom name="screw_thread_120" class="screw_col" type="capsule" size="0.00060" fromto="-0.00540 0.00000 0.03280 -0.00499 -0.00207 0.03295" mass="0"/>
+      <geom name="screw_thread_121" class="screw_col" type="capsule" size="0.00060" fromto="-0.00499 -0.00207 0.03295 -0.00382 -0.00382 0.03310" mass="0"/>
+      <geom name="screw_thread_122" class="screw_col" type="capsule" size="0.00060" fromto="-0.00382 -0.00382 0.03310 -0.00207 -0.00499 0.03325" mass="0"/>
+      <geom name="screw_thread_123" class="screw_col" type="capsule" size="0.00060" fromto="-0.00207 -0.00499 0.03325 -0.00000 -0.00540 0.03340" mass="0"/>
+      <geom name="screw_thread_124" class="screw_col" type="capsule" size="0.00060" fromto="-0.00000 -0.00540 0.03340 0.00207 -0.00499 0.03355" mass="0"/>
+      <geom name="screw_thread_125" class="screw_col" type="capsule" size="0.00060" fromto="0.00207 -0.00499 0.03355 0.00382 -0.00382 0.03370" mass="0"/>
+      <geom name="screw_thread_126" class="screw_col" type="capsule" size="0.00060" fromto="0.00382 -0.00382 0.03370 0.00499 -0.00207 0.03385" mass="0"/>
+      <geom name="screw_thread_127" class="screw_col" type="capsule" size="0.00060" fromto="0.00499 -0.00207 0.03385 0.00540 -0.00000 0.03400" mass="0"/>
+      <geom name="screw_thread_128" class="screw_col" type="capsule" size="0.00060" fromto="0.00540 -0.00000 0.03400 0.00499 0.00207 0.03415" mass="0"/>
+      <geom name="screw_thread_129" class="screw_col" type="capsule" size="0.00060" fromto="0.00499 0.00207 0.03415 0.00382 0.00382 0.03430" mass="0"/>
+      <geom name="screw_thread_130" class="screw_col" type="capsule" size="0.00060" fromto="0.00382 0.00382 0.03430 0.00207 0.00499 0.03445" mass="0"/>
+      <geom name="screw_thread_131" class="screw_col" type="capsule" size="0.00060" fromto="0.00207 0.00499 0.03445 0.00000 0.00540 0.03460" mass="0"/>
+      <geom name="screw_thread_132" class="screw_col" type="capsule" size="0.00060" fromto="0.00000 0.00540 0.03460 -0.00207 0.00499 0.03475" mass="0"/>
+      <geom name="screw_thread_133" class="screw_col" type="capsule" size="0.00060" fromto="-0.00207 0.00499 0.03475 -0.00382 0.00382 0.03490" mass="0"/>
+      <geom name="screw_thread_134" class="screw_col" type="capsule" size="0.00060" fromto="-0.00382 0.00382 0.03490 -0.00499 0.00207 0.03505" mass="0"/>
+      <geom name="screw_thread_135" class="screw_col" type="capsule" size="0.00060" fromto="-0.00499 0.00207 0.03505 -0.00540 -0.00000 0.03520" mass="0"/>
+      <geom name="screw_thread_136" class="screw_col" type="capsule" size="0.00060" fromto="-0.00540 -0.00000 0.03520 -0.00499 -0.00207 0.03535" mass="0"/>
+      <geom name="screw_thread_137" class="screw_col" type="capsule" size="0.00060" fromto="-0.00499 -0.00207 0.03535 -0.00382 -0.00382 0.03550" mass="0"/>
+      <geom name="screw_thread_138" class="screw_col" type="capsule" size="0.00060" fromto="-0.00382 -0.00382 0.03550 -0.00207 -0.00499 0.03565" mass="0"/>
+      <geom name="screw_thread_139" class="screw_col" type="capsule" size="0.00060" fromto="-0.00207 -0.00499 0.03565 -0.00000 -0.00540 0.03580" mass="0"/>
+      <geom name="screw_thread_140" class="screw_col" type="capsule" size="0.00060" fromto="-0.00000 -0.00540 0.03580 0.00207 -0.00499 0.03595" mass="0"/>
+      <geom name="screw_thread_141" class="screw_col" type="capsule" size="0.00060" fromto="0.00207 -0.00499 0.03595 0.00382 -0.00382 0.03610" mass="0"/>
+      <geom name="screw_thread_142" class="screw_col" type="capsule" size="0.00060" fromto="0.00382 -0.00382 0.03610 0.00499 -0.00207 0.03625" mass="0"/>
+      <geom name="screw_thread_143" class="screw_col" type="capsule" size="0.00060" fromto="0.00499 -0.00207 0.03625 0.00540 -0.00000 0.03640" mass="0"/>
+      <geom name="screw_thread_144" class="screw_col" type="capsule" size="0.00060" fromto="0.00540 -0.00000 0.03640 0.00499 0.00207 0.03655" mass="0"/>
+      <geom name="screw_thread_145" class="screw_col" type="capsule" size="0.00060" fromto="0.00499 0.00207 0.03655 0.00382 0.00382 0.03670" mass="0"/>
+      <geom name="screw_thread_146" class="screw_col" type="capsule" size="0.00060" fromto="0.00382 0.00382 0.03670 0.00207 0.00499 0.03685" mass="0"/>
+      <geom name="screw_thread_147" class="screw_col" type="capsule" size="0.00060" fromto="0.00207 0.00499 0.03685 0.00000 0.00540 0.03700" mass="0"/>
+      <geom name="screw_thread_148" class="screw_col" type="capsule" size="0.00060" fromto="0.00000 0.00540 0.03700 -0.00207 0.00499 0.03715" mass="0"/>
+      <geom name="screw_thread_149" class="screw_col" type="capsule" size="0.00060" fromto="-0.00207 0.00499 0.03715 -0.00382 0.00382 0.03730" mass="0"/>
+      <geom name="screw_thread_150" class="screw_col" type="capsule" size="0.00060" fromto="-0.00382 0.00382 0.03730 -0.00499 0.00207 0.03745" mass="0"/>
+      <geom name="screw_thread_151" class="screw_col" type="capsule" size="0.00060" fromto="-0.00499 0.00207 0.03745 -0.00540 0.00000 0.03760" mass="0"/>
+      <geom name="screw_thread_152" class="screw_col" type="capsule" size="0.00060" fromto="-0.00540 0.00000 0.03760 -0.00499 -0.00207 0.03775" mass="0"/>
+      <geom name="screw_thread_153" class="screw_col" type="capsule" size="0.00060" fromto="-0.00499 -0.00207 0.03775 -0.00382 -0.00382 0.03790" mass="0"/>
+      <geom name="screw_thread_154" class="screw_col" type="capsule" size="0.00060" fromto="-0.00382 -0.00382 0.03790 -0.00207 -0.00499 0.03805" mass="0"/>
+      <geom name="screw_thread_155" class="screw_col" type="capsule" size="0.00060" fromto="-0.00207 -0.00499 0.03805 -0.00000 -0.00540 0.03820" mass="0"/>
+      <geom name="screw_thread_156" class="screw_col" type="capsule" size="0.00060" fromto="-0.00000 -0.00540 0.03820 0.00207 -0.00499 0.03835" mass="0"/>
+      <geom name="screw_thread_157" class="screw_col" type="capsule" size="0.00060" fromto="0.00207 -0.00499 0.03835 0.00382 -0.00382 0.03850" mass="0"/>
+      <geom name="screw_thread_158" class="screw_col" type="capsule" size="0.00060" fromto="0.00382 -0.00382 0.03850 0.00499 -0.00207 0.03865" mass="0"/>
+      <geom name="screw_thread_159" class="screw_col" type="capsule" size="0.00060" fromto="0.00499 -0.00207 0.03865 0.00540 -0.00000 0.03880" mass="0"/>
+      <geom name="screw_thread_160" class="screw_col" type="capsule" size="0.00060" fromto="0.00540 -0.00000 0.03880 0.00499 0.00207 0.03895" mass="0"/>
+      <geom name="screw_thread_161" class="screw_col" type="capsule" size="0.00060" fromto="0.00499 0.00207 0.03895 0.00382 0.00382 0.03910" mass="0"/>
+      <geom name="screw_thread_162" class="screw_col" type="capsule" size="0.00060" fromto="0.00382 0.00382 0.03910 0.00207 0.00499 0.03925" mass="0"/>
+      <geom name="screw_thread_163" class="screw_col" type="capsule" size="0.00060" fromto="0.00207 0.00499 0.03925 0.00000 0.00540 0.03940" mass="0"/>
+      <geom name="screw_thread_164" class="screw_col" type="capsule" size="0.00060" fromto="0.00000 0.00540 0.03940 -0.00207 0.00499 0.03955" mass="0"/>
+      <geom name="screw_thread_165" class="screw_col" type="capsule" size="0.00060" fromto="-0.00207 0.00499 0.03955 -0.00382 0.00382 0.03970" mass="0"/>
+      <geom name="screw_thread_166" class="screw_col" type="capsule" size="0.00060" fromto="-0.00382 0.00382 0.03970 -0.00499 0.00207 0.03985" mass="0"/>
+      <geom name="screw_thread_167" class="screw_col" type="capsule" size="0.00060" fromto="-0.00499 0.00207 0.03985 -0.00540 -0.00000 0.04000" mass="0"/>
+      <geom name="screw_thread_168" class="screw_col" type="capsule" size="0.00060" fromto="-0.00540 -0.00000 0.04000 -0.00499 -0.00207 0.04015" mass="0"/>
+      <geom name="screw_thread_169" class="screw_col" type="capsule" size="0.00060" fromto="-0.00499 -0.00207 0.04015 -0.00382 -0.00382 0.04030" mass="0"/>
+      <geom name="screw_thread_170" class="screw_col" type="capsule" size="0.00060" fromto="-0.00382 -0.00382 0.04030 -0.00207 -0.00499 0.04045" mass="0"/>
+      <geom name="screw_thread_171" class="screw_col" type="capsule" size="0.00060" fromto="-0.00207 -0.00499 0.04045 -0.00000 -0.00540 0.04060" mass="0"/>
+      <geom name="screw_thread_172" class="screw_col" type="capsule" size="0.00060" fromto="-0.00000 -0.00540 0.04060 0.00207 -0.00499 0.04075" mass="0"/>
+      <geom name="screw_thread_173" class="screw_col" type="capsule" size="0.00060" fromto="0.00207 -0.00499 0.04075 0.00382 -0.00382 0.04090" mass="0"/>
+      <geom name="screw_thread_174" class="screw_col" type="capsule" size="0.00060" fromto="0.00382 -0.00382 0.04090 0.00499 -0.00207 0.04105" mass="0"/>
+      <geom name="screw_thread_175" class="screw_col" type="capsule" size="0.00060" fromto="0.00499 -0.00207 0.04105 0.00540 -0.00000 0.04120" mass="0"/>
+      <geom name="screw_thread_176" class="screw_col" type="capsule" size="0.00060" fromto="0.00540 -0.00000 0.04120 0.00499 0.00207 0.04135" mass="0"/>
+      <geom name="screw_thread_177" class="screw_col" type="capsule" size="0.00060" fromto="0.00499 0.00207 0.04135 0.00382 0.00382 0.04150" mass="0"/>
+      <geom name="screw_thread_178" class="screw_col" type="capsule" size="0.00060" fromto="0.00382 0.00382 0.04150 0.00207 0.00499 0.04165" mass="0"/>
+      <geom name="screw_thread_179" class="screw_col" type="capsule" size="0.00060" fromto="0.00207 0.00499 0.04165 0.00000 0.00540 0.04180" mass="0"/>
+      <geom name="screw_thread_180" class="screw_col" type="capsule" size="0.00060" fromto="0.00000 0.00540 0.04180 -0.00207 0.00499 0.04195" mass="0"/>
+      <geom name="screw_thread_181" class="screw_col" type="capsule" size="0.00060" fromto="-0.00207 0.00499 0.04195 -0.00382 0.00382 0.04210" mass="0"/>
+      <geom name="screw_thread_182" class="screw_col" type="capsule" size="0.00060" fromto="-0.00382 0.00382 0.04210 -0.00499 0.00207 0.04225" mass="0"/>
+      <geom name="screw_thread_183" class="screw_col" type="capsule" size="0.00060" fromto="-0.00499 0.00207 0.04225 -0.00540 0.00000 0.04240" mass="0"/>
+      <geom name="screw_thread_184" class="screw_col" type="capsule" size="0.00060" fromto="-0.00540 0.00000 0.04240 -0.00499 -0.00207 0.04255" mass="0"/>
+      <geom name="screw_thread_185" class="screw_col" type="capsule" size="0.00060" fromto="-0.00499 -0.00207 0.04255 -0.00382 -0.00382 0.04270" mass="0"/>
+      <geom name="screw_thread_186" class="screw_col" type="capsule" size="0.00060" fromto="-0.00382 -0.00382 0.04270 -0.00207 -0.00499 0.04285" mass="0"/>
+      <geom name="screw_thread_187" class="screw_col" type="capsule" size="0.00060" fromto="-0.00207 -0.00499 0.04285 0.00000 -0.00540 0.04300" mass="0"/>
+      <geom name="screw_thread_188" class="screw_col" type="capsule" size="0.00060" fromto="0.00000 -0.00540 0.04300 0.00207 -0.00499 0.04315" mass="0"/>
+      <geom name="screw_thread_189" class="screw_col" type="capsule" size="0.00060" fromto="0.00207 -0.00499 0.04315 0.00382 -0.00382 0.04330" mass="0"/>
+      <geom name="screw_thread_190" class="screw_col" type="capsule" size="0.00060" fromto="0.00382 -0.00382 0.04330 0.00499 -0.00207 0.04345" mass="0"/>
+      <geom name="screw_thread_191" class="screw_col" type="capsule" size="0.00060" fromto="0.00499 -0.00207 0.04345 0.00540 -0.00000 0.04360" mass="0"/>
+    </body>
+
+    <!-- Free hollow hex flange nut (29.0g, bottom flange OD 29mm, top hex OD 20mm, bore 12mm, height 14.5mm) -->
+    <body name="nut" pos="0.3538 -0.0114 0">
+      <freejoint name="nut_joint" />
+      <geom name="nut_visual" type="mesh" mesh="nut" material="nut_mat" group="1" contype="0" conaffinity="0" mass="0" />
+      <geom name="nut_flange_00" class="nut_flange" pos="0.01075 0.00000 0.00190" quat="1.000000 0.000000 0.000000 0.000000" />
+      <geom name="nut_flange_01" class="nut_flange" pos="0.01022 0.00332 0.00190" quat="0.987688 0.000000 0.000000 0.156434" />
+      <geom name="nut_flange_02" class="nut_flange" pos="0.00870 0.00632 0.00190" quat="0.951057 0.000000 0.000000 0.309017" />
+      <geom name="nut_flange_03" class="nut_flange" pos="0.00632 0.00870 0.00190" quat="0.891007 0.000000 0.000000 0.453990" />
+      <geom name="nut_flange_04" class="nut_flange" pos="0.00332 0.01022 0.00190" quat="0.809017 0.000000 0.000000 0.587785" />
+      <geom name="nut_flange_05" class="nut_flange" pos="0.00000 0.01075 0.00190" quat="0.707107 0.000000 0.000000 0.707107" />
+      <geom name="nut_flange_06" class="nut_flange" pos="-0.00332 0.01022 0.00190" quat="0.587785 0.000000 0.000000 0.809017" />
+      <geom name="nut_flange_07" class="nut_flange" pos="-0.00632 0.00870 0.00190" quat="0.453990 0.000000 0.000000 0.891007" />
+      <geom name="nut_flange_08" class="nut_flange" pos="-0.00870 0.00632 0.00190" quat="0.309017 0.000000 0.000000 0.951057" />
+      <geom name="nut_flange_09" class="nut_flange" pos="-0.01022 0.00332 0.00190" quat="0.156434 0.000000 0.000000 0.987688" />
+      <geom name="nut_flange_10" class="nut_flange" pos="-0.01075 0.00000 0.00190" quat="0.000000 0.000000 0.000000 1.000000" />
+      <geom name="nut_flange_11" class="nut_flange" pos="-0.01022 -0.00332 0.00190" quat="-0.156434 0.000000 0.000000 0.987688" />
+      <geom name="nut_flange_12" class="nut_flange" pos="-0.00870 -0.00632 0.00190" quat="-0.309017 0.000000 0.000000 0.951057" />
+      <geom name="nut_flange_13" class="nut_flange" pos="-0.00632 -0.00870 0.00190" quat="-0.453990 0.000000 0.000000 0.891007" />
+      <geom name="nut_flange_14" class="nut_flange" pos="-0.00332 -0.01022 0.00190" quat="-0.587785 0.000000 0.000000 0.809017" />
+      <geom name="nut_flange_15" class="nut_flange" pos="-0.00000 -0.01075 0.00190" quat="-0.707107 0.000000 0.000000 0.707107" />
+      <geom name="nut_flange_16" class="nut_flange" pos="0.00332 -0.01022 0.00190" quat="-0.809017 0.000000 0.000000 0.587785" />
+      <geom name="nut_flange_17" class="nut_flange" pos="0.00632 -0.00870 0.00190" quat="-0.891007 0.000000 0.000000 0.453990" />
+      <geom name="nut_flange_18" class="nut_flange" pos="0.00870 -0.00632 0.00190" quat="-0.951057 0.000000 0.000000 0.309017" />
+      <geom name="nut_flange_19" class="nut_flange" pos="0.01022 -0.00332 0.00190" quat="-0.987688 0.000000 0.000000 0.156434" />
+      <geom name="nut_body_00" class="nut_body" pos="0.00817 0.00000 0.00915" quat="1.000000 0.000000 0.000000 0.000000" />
+      <geom name="nut_body_01" class="nut_body" pos="0.00777 0.00253 0.00915" quat="0.987688 0.000000 0.000000 0.156434" />
+      <geom name="nut_body_02" class="nut_body" pos="0.00661 0.00481 0.00915" quat="0.951057 0.000000 0.000000 0.309017" />
+      <geom name="nut_body_03" class="nut_body" pos="0.00481 0.00661 0.00915" quat="0.891007 0.000000 0.000000 0.453990" />
+      <geom name="nut_body_04" class="nut_body" pos="0.00253 0.00777 0.00915" quat="0.809017 0.000000 0.000000 0.587785" />
+      <geom name="nut_body_05" class="nut_body" pos="0.00000 0.00817 0.00915" quat="0.707107 0.000000 0.000000 0.707107" />
+      <geom name="nut_body_06" class="nut_body" pos="-0.00253 0.00777 0.00915" quat="0.587785 0.000000 0.000000 0.809017" />
+      <geom name="nut_body_07" class="nut_body" pos="-0.00481 0.00661 0.00915" quat="0.453990 0.000000 0.000000 0.891007" />
+      <geom name="nut_body_08" class="nut_body" pos="-0.00661 0.00481 0.00915" quat="0.309017 0.000000 0.000000 0.951057" />
+      <geom name="nut_body_09" class="nut_body" pos="-0.00777 0.00253 0.00915" quat="0.156434 0.000000 0.000000 0.987688" />
+      <geom name="nut_body_10" class="nut_body" pos="-0.00817 0.00000 0.00915" quat="0.000000 0.000000 0.000000 1.000000" />
+      <geom name="nut_body_11" class="nut_body" pos="-0.00777 -0.00253 0.00915" quat="-0.156434 0.000000 0.000000 0.987688" />
+      <geom name="nut_body_12" class="nut_body" pos="-0.00661 -0.00481 0.00915" quat="-0.309017 0.000000 0.000000 0.951057" />
+      <geom name="nut_body_13" class="nut_body" pos="-0.00481 -0.00661 0.00915" quat="-0.453990 0.000000 0.000000 0.891007" />
+      <geom name="nut_body_14" class="nut_body" pos="-0.00253 -0.00777 0.00915" quat="-0.587785 0.000000 0.000000 0.809017" />
+      <geom name="nut_body_15" class="nut_body" pos="-0.00000 -0.00817 0.00915" quat="-0.707107 0.000000 0.000000 0.707107" />
+      <geom name="nut_body_16" class="nut_body" pos="0.00253 -0.00777 0.00915" quat="-0.809017 0.000000 0.000000 0.587785" />
+      <geom name="nut_body_17" class="nut_body" pos="0.00481 -0.00661 0.00915" quat="-0.891007 0.000000 0.000000 0.453990" />
+      <geom name="nut_body_18" class="nut_body" pos="0.00661 -0.00481 0.00915" quat="-0.951057 0.000000 0.000000 0.309017" />
+      <geom name="nut_body_19" class="nut_body" pos="0.00777 -0.00253 0.00915" quat="-0.987688 0.000000 0.000000 0.156434" />
+      <geom name="nut_tooth_00" class="nut_col" type="sphere" pos="0.00585 0.00000 0.00720" size="0.00045" mass="0" />
+      <geom name="nut_tooth_01" class="nut_col" type="sphere" pos="0.00414 0.00414 0.00750" size="0.00045" mass="0" />
+      <geom name="nut_tooth_02" class="nut_col" type="sphere" pos="0.00000 0.00585 0.00780" size="0.00045" mass="0" />
+      <geom name="nut_tooth_03" class="nut_col" type="sphere" pos="-0.00414 0.00414 0.00810" size="0.00045" mass="0" />
+      <geom name="nut_tooth_04" class="nut_col" type="sphere" pos="-0.00585 0.00000 0.00840" size="0.00045" mass="0" />
+      <geom name="nut_tooth_05" class="nut_col" type="sphere" pos="-0.00414 -0.00414 0.00870" size="0.00045" mass="0" />
+      <geom name="nut_tooth_06" class="nut_col" type="sphere" pos="-0.00000 -0.00585 0.00900" size="0.00045" mass="0" />
+      <geom name="nut_tooth_07" class="nut_col" type="sphere" pos="0.00414 -0.00414 0.00930" size="0.00045" mass="0" />
+    </body>
+  </worldbody>
+</mujoco>

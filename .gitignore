@@ -1,0 +1,51 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+*.egg
+dist/
+
+# Test, simulation & real-robot outputs (images, point clouds, JSON reports, logs)
+build/
+reports/
+logs/
+*.log
+MUJOCO_LOG.TXT
+mjmodel.xml
+*.npy
+*.npz
+*.png
+*.jpg
+*.jpeg
+!assets/**/*.png
+!examples/**/assets/*.png
+!docs/**/*.png
+
+# Personal & AI agent development markdown files (local only, never tracked)
+AGENTS.md
+prd.md
+worklog.md
+roadmap.md
+todolist.md
+CLAUDE.md
+
+# Caches & virtual environments
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+env/
+
+# IDE / OS
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+

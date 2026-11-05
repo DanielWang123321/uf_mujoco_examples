@@ -1,0 +1,54 @@
+[build-system]
+requires = ["setuptools>=70"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "uf_mujoco_examples"
+version = "0.0.3"
+description = "Contact-rich MuJoCo manipulation and Sim-to-Real examples for UFACTORY xArm 6 + Gripper G2 + Orbbec Gemini 305"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE", "NOTICE"]
+requires-python = ">=3.12"
+dependencies = [
+    "mujoco>=3.15,<4",
+    "numpy>=2.0,<3",
+    "scipy>=1.14,<2",
+    "pyyaml>=6.0,<7",
+    "opencv-python>=4.8,<5",
+]
+classifiers = [
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Scientific/Engineering :: Physics",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.6",
+    "trimesh>=4.0",
+]
+
+[tool.setuptools.packages.find]
+include = ["common*", "examples*"]
+namespaces = false
+
+[tool.pytest.ini_options]
+testpaths = [
+    "assets/screw_nut",
+    "examples/pick_cup",
+    "examples/stack_cups",
+    "examples/screw_nut",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B"]
+ignore = ["E402", "E501"]
+

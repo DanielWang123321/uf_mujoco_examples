@@ -1,0 +1,65 @@
+<mujoco model="paper_cup">
+  <compiler angle="radian"/>
+
+  <visual>
+    <headlight ambient="0.35 0.35 0.35" diffuse="0.6 0.6 0.6" specular="0.3 0.3 0.3"/>
+    <quality shadowsize="4096"/>
+  </visual>
+
+  <asset>
+    <mesh name="paper_cup" file="paper_cup.obj"/>
+    <material name="paper_cup_mat" rgba="0.96 0.95 0.92 1.0" specular="0.15" shininess="0.2"/>
+    <texture name="grid" type="2d" builtin="checker" width="512" height="512" rgb1="0.85 0.87 0.90" rgb2="0.72 0.75 0.78"/>
+    <material name="floor_mat" texture="grid" texrepeat="8 8" reflectance="0.08"/>
+  </asset>
+
+  <default>
+    <default class="collision">
+      <geom group="3" friction="0.8 0.02 0.002" solref="0.005 1" solimp="0.95 0.99 0.001" rgba="0.2 0.6 0.9 0.45"/>
+      <default class="cup_wall">
+        <geom type="box" size="0.00050 0.00424 0.04378" mass="0.000190"/>
+      </default>
+      <default class="cup_bottom">
+        <geom type="cylinder" size="0.02600 0.00050" mass="0.001180"/>
+      </default>
+    </default>
+  </default>
+
+  <worldbody>
+    <light pos="0.3 -0.4 0.6" dir="-0.5 0.6 -1.0" diffuse="0.7 0.7 0.7" castshadow="true"/>
+    <light pos="-0.3 0.3 0.5" dir="0.4 -0.4 -1.0" diffuse="0.4 0.4 0.4" castshadow="false"/>
+    <geom name="floor" type="plane" size="1.0 1.0 0.01" material="floor_mat"/>
+
+    <body name="paper_cup" pos="0 0 0">
+      <freejoint name="paper_cup_joint"/>
+      <!-- Visual mesh (group 1, visible by default) -->
+      <geom name="paper_cup_visual" type="mesh" mesh="paper_cup" material="paper_cup_mat" group="1" contype="0" conaffinity="0" mass="0"/>
+      <!-- Hollow collision primitives (group 3, press '4' in viewer to toggle) -->
+      <geom name="cup_bottom" class="cup_bottom" pos="0 0 0.00050"/>
+      <geom name="cup_wall_00" class="cup_wall" pos="0.03156 0.00000 0.04450" quat="0.998068 -0.000000 0.062137 0.000000" />
+      <geom name="cup_wall_01" class="cup_wall" pos="0.03049 0.00817 0.04450" quat="0.989529 -0.008111 0.061606 0.130274" />
+      <geom name="cup_wall_02" class="cup_wall" pos="0.02733 0.01578 0.04450" quat="0.964059 -0.016082 0.060020 0.258319" />
+      <geom name="cup_wall_03" class="cup_wall" pos="0.02232 0.02232 0.04450" quat="0.922094 -0.023779 0.057408 0.381944" />
+      <geom name="cup_wall_04" class="cup_wall" pos="0.01578 0.02733 0.04450" quat="0.864352 -0.031069 0.053813 0.499034" />
+      <geom name="cup_wall_05" class="cup_wall" pos="0.00817 0.03049 0.04450" quat="0.791820 -0.037827 0.049297 0.607585" />
+      <geom name="cup_wall_06" class="cup_wall" pos="0.00000 0.03156 0.04450" quat="0.705740 -0.043938 0.043938 0.705740" />
+      <geom name="cup_wall_07" class="cup_wall" pos="-0.00817 0.03049 0.04450" quat="0.607585 -0.049297 0.037827 0.791820" />
+      <geom name="cup_wall_08" class="cup_wall" pos="-0.01578 0.02733 0.04450" quat="0.499034 -0.053813 0.031069 0.864352" />
+      <geom name="cup_wall_09" class="cup_wall" pos="-0.02232 0.02232 0.04450" quat="0.381944 -0.057408 0.023779 0.922094" />
+      <geom name="cup_wall_10" class="cup_wall" pos="-0.02733 0.01578 0.04450" quat="0.258319 -0.060020 0.016082 0.964059" />
+      <geom name="cup_wall_11" class="cup_wall" pos="-0.03049 0.00817 0.04450" quat="0.130274 -0.061606 0.008111 0.989529" />
+      <geom name="cup_wall_12" class="cup_wall" pos="-0.03156 0.00000 0.04450" quat="0.000000 -0.062137 0.000000 0.998068" />
+      <geom name="cup_wall_13" class="cup_wall" pos="-0.03049 -0.00817 0.04450" quat="-0.130274 -0.061606 -0.008111 0.989529" />
+      <geom name="cup_wall_14" class="cup_wall" pos="-0.02733 -0.01578 0.04450" quat="-0.258319 -0.060020 -0.016082 0.964059" />
+      <geom name="cup_wall_15" class="cup_wall" pos="-0.02232 -0.02232 0.04450" quat="-0.381944 -0.057408 -0.023779 0.922094" />
+      <geom name="cup_wall_16" class="cup_wall" pos="-0.01578 -0.02733 0.04450" quat="-0.499034 -0.053813 -0.031069 0.864352" />
+      <geom name="cup_wall_17" class="cup_wall" pos="-0.00817 -0.03049 0.04450" quat="-0.607585 -0.049297 -0.037827 0.791820" />
+      <geom name="cup_wall_18" class="cup_wall" pos="-0.00000 -0.03156 0.04450" quat="-0.705740 -0.043938 -0.043938 0.705740" />
+      <geom name="cup_wall_19" class="cup_wall" pos="0.00817 -0.03049 0.04450" quat="-0.791820 -0.037827 -0.049297 0.607585" />
+      <geom name="cup_wall_20" class="cup_wall" pos="0.01578 -0.02733 0.04450" quat="-0.864352 -0.031069 -0.053813 0.499034" />
+      <geom name="cup_wall_21" class="cup_wall" pos="0.02232 -0.02232 0.04450" quat="-0.922094 -0.023779 -0.057408 0.381944" />
+      <geom name="cup_wall_22" class="cup_wall" pos="0.02733 -0.01578 0.04450" quat="-0.964059 -0.016082 -0.060020 0.258319" />
+      <geom name="cup_wall_23" class="cup_wall" pos="0.03049 -0.00817 0.04450" quat="-0.989529 -0.008111 -0.061606 0.130274" />
+    </body>
+  </worldbody>
+</mujoco>
