@@ -1,9 +1,11 @@
-"""Eye-in-Hand RGB-D perception, look-down secondary refinement, and closed-loop verification for 0.0.3 screw_nut."""
+# SPDX-License-Identifier: BSD-3-Clause
+# Copyright (c) 2026, UFACTORY Inc.
+"""Eye-in-Hand RGB-D perception for screw_nut: overview detection, look-down refinement of the
+nut and the fixed screw, and post-threading verification."""
 
 from __future__ import annotations
 
 import math
-import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -11,11 +13,8 @@ from typing import Any
 import cv2
 import numpy as np
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from common.paths import DEFAULT_HANDEYE_YAML
 from common.vision import (
-    CAMERA_TOOL_SRC,
-    DEFAULT_HANDEYE_YAML,
-    PY312_PYTHON,
     WORKSPACE_BOUNDS_M,
     OrbbecCameraStream,
     PerceptionError,
@@ -26,7 +25,7 @@ from common.vision import (
     validate_xy_in_workspace,
 )
 
-# Physical specs from prd.md 0.0.3 and Gemini 305 scan
+# Object dimensions (measured with a Gemini 305 3D scan).
 SCREW_TOTAL_LEN_MM = 45.0
 SCREW_HEAD_LEN_MM = 14.0
 SCREW_HEAD_DIAM_MM = 20.0
@@ -40,9 +39,7 @@ NUT_FLANGE_HEIGHT_MM = 3.8
 MIN_NUT_SCREW_SEPARATION_M = 0.045
 
 __all__ = [
-    "CAMERA_TOOL_SRC",
     "DEFAULT_HANDEYE_YAML",
-    "PY312_PYTHON",
     "WORKSPACE_BOUNDS_M",
     "NutPoseEstimate",
     "OrbbecCameraStream",
@@ -147,13 +144,13 @@ def pose_estimates_from_manual(
     """Validate and construct manual NutPoseEstimate and ScrewPoseEstimate."""
     n_xy = np.asarray(nut_xy_m, dtype=np.float64).reshape(2)
     s_xy = np.asarray(screw_xy_m, dtype=np.float64).reshape(2)
-    validate_xy_in_workspace(n_xy, "手动指定的螺母中心", bounds)
-    validate_xy_in_workspace(s_xy, "手动指定的固定螺丝中心", bounds)
+    validate_xy_in_workspace(n_xy, "Manual nut center", bounds)
+    validate_xy_in_workspace(s_xy, "Manual screw center", bounds)
     sep = float(np.linalg.norm(n_xy - s_xy))
     if sep < MIN_NUT_SCREW_SEPARATION_M:
         raise PerceptionError(
-            f"螺母初始位置与固定螺丝间距过近 ({sep * 1000:.1f} mm < "
-            f"{MIN_NUT_SCREW_SEPARATION_M * 1000:.0f} mm)，存在夹爪干涉风险"
+            f"Nut is too close to the screw ({sep * 1000:.1f} mm < "
+            f"{MIN_NUT_SCREW_SEPARATION_M * 1000:.0f} mm); the gripper may hit the screw"
         )
     nut_est = NutPoseEstimate(
         xy_m=(float(n_xy[0]), float(n_xy[1])),
@@ -222,21 +219,16 @@ def detect_nut_near(
     t_base_cam = np.asarray(t_base_flange, dtype=np.float64).reshape(4, 4) @ x_flange_cam
     exp_xy = np.asarray(expected_xy_m, dtype=np.float64).reshape(2)
     excl_xy = (
-        np.asarray(exclude_xy_m, dtype=np.float64).reshape(2)
-        if exclude_xy_m is not None
-        else None
+        np.asarray(exclude_xy_m, dtype=np.float64).reshape(2) if exclude_xy_m is not None else None
     )
 
     if color_bgr is None or depth_m is None or color_bgr.shape[:2] != depth_m.shape[:2]:
-        raise PerceptionError("输入的 RGB 与深度图尺寸无效或不匹配")
+        raise PerceptionError("Color and depth images are invalid or differ in size")
 
     h, w = depth_m.shape
     ys, xs = np.mgrid[0:h, 0:w]
     fov_mask = (
-        (ys >= int(0.06 * h))
-        & (ys < int(0.88 * h))
-        & (xs >= int(0.06 * w))
-        & (xs < int(0.94 * w))
+        (ys >= int(0.06 * h)) & (ys < int(0.88 * h)) & (xs >= int(0.06 * w)) & (xs < int(0.94 * w))
     )
     valid_d = np.isfinite(depth_m) & (depth_m > 0.07) & (depth_m < 0.72) & fov_mask
     if int(np.count_nonzero(valid_d)) < 200:
@@ -253,10 +245,15 @@ def detect_nut_near(
     fg_all = fg_mask[valid_d]
 
     dist_to_exp = np.linalg.norm(pts_base[:, :2] - exp_xy, axis=1)
-    bg_ring = (~fg_all) & (dist_to_exp >= 0.022) & (dist_to_exp <= max(0.095, search_radius_m + 0.02)) & (
-        np.abs(pts_base[:, 2]) < 0.030
+    bg_ring = (
+        (~fg_all)
+        & (dist_to_exp >= 0.022)
+        & (dist_to_exp <= max(0.095, search_radius_m + 0.02))
+        & (np.abs(pts_base[:, 2]) < 0.030)
     )
-    local_table_z = float(np.median(pts_base[bg_ring, 2])) if int(np.count_nonzero(bg_ring)) >= 60 else 0.0
+    local_table_z = (
+        float(np.median(pts_base[bg_ring, 2])) if int(np.count_nonzero(bg_ring)) >= 60 else 0.0
+    )
 
     cand_mask = (
         fg_all
@@ -275,8 +272,11 @@ def detect_nut_near(
             "reason": "nut_not_found_in_search_radius",
         }
 
-    # Robustly cluster around the densest 2D median to reject isolated noise specks
-    rough_xy = np.median(cand_pts[:, :2], axis=0)
+    # Seed the cluster center from the elevated hex body (z >= 5.5 mm) so flat tabletop
+    # markings with small depth noise cannot pull the median away from the nut.
+    elevated_pts = cand_pts[cand_pts[:, 2] >= local_table_z + 0.0055]
+    seed_pts = elevated_pts if len(elevated_pts) >= 20 else cand_pts
+    rough_xy = np.median(seed_pts[:, :2], axis=0)
     in_cluster = np.linalg.norm(cand_pts[:, :2] - rough_xy, axis=1) <= 0.022
     nut_pts = cand_pts[in_cluster]
     if len(nut_pts) < 55:
@@ -303,7 +303,7 @@ def detect_nut_near(
         else np.median(nut_pts[:, :2], axis=0)
     )
     try:
-        validate_xy_in_workspace(center_xy, "感知到的螺母中心", workspace_bounds)
+        validate_xy_in_workspace(center_xy, "Detected nut center", workspace_bounds)
     except PerceptionError:
         return None, {
             "t_base_cam": t_base_cam,
@@ -313,7 +313,9 @@ def detect_nut_near(
 
     radii = np.linalg.norm(nut_pts[:, :2] - center_xy, axis=1)
     outer_diam_mm = float(2.0 * np.percentile(radii, 95.0) * 1000.0)
-    yaw_src = (upper_pts[:, :2] - center_xy) if len(upper_pts) >= 25 else (nut_pts[:, :2] - center_xy)
+    yaw_src = (
+        (upper_pts[:, :2] - center_xy) if len(upper_pts) >= 25 else (nut_pts[:, :2] - center_xy)
+    )
     yaw_deg = _estimate_hex_yaw_deg(yaw_src)
 
     est = NutPoseEstimate(
@@ -352,21 +354,16 @@ def detect_screw_near(
     t_base_cam = np.asarray(t_base_flange, dtype=np.float64).reshape(4, 4) @ x_flange_cam
     exp_xy = np.asarray(expected_xy_m, dtype=np.float64).reshape(2)
     excl_xy = (
-        np.asarray(exclude_xy_m, dtype=np.float64).reshape(2)
-        if exclude_xy_m is not None
-        else None
+        np.asarray(exclude_xy_m, dtype=np.float64).reshape(2) if exclude_xy_m is not None else None
     )
 
     if color_bgr is None or depth_m is None or color_bgr.shape[:2] != depth_m.shape[:2]:
-        raise PerceptionError("输入的 RGB 与深度图尺寸无效或不匹配")
+        raise PerceptionError("Color and depth images are invalid or differ in size")
 
     h, w = depth_m.shape
     ys, xs = np.mgrid[0:h, 0:w]
     fov_mask = (
-        (ys >= int(0.06 * h))
-        & (ys < int(0.88 * h))
-        & (xs >= int(0.06 * w))
-        & (xs < int(0.94 * w))
+        (ys >= int(0.06 * h)) & (ys < int(0.88 * h)) & (xs >= int(0.06 * w)) & (xs < int(0.94 * w))
     )
     valid_d = np.isfinite(depth_m) & (depth_m > 0.07) & (depth_m < 0.72) & fov_mask
     if int(np.count_nonzero(valid_d)) < 200:
@@ -383,10 +380,15 @@ def detect_screw_near(
     fg_all = fg_mask[valid_d]
 
     dist_to_exp = np.linalg.norm(pts_base[:, :2] - exp_xy, axis=1)
-    bg_ring = (~fg_all) & (dist_to_exp >= 0.020) & (dist_to_exp <= max(0.095, search_radius_m + 0.02)) & (
-        np.abs(pts_base[:, 2]) < 0.030
+    bg_ring = (
+        (~fg_all)
+        & (dist_to_exp >= 0.020)
+        & (dist_to_exp <= max(0.095, search_radius_m + 0.02))
+        & (np.abs(pts_base[:, 2]) < 0.030)
     )
-    local_table_z = float(np.median(pts_base[bg_ring, 2])) if int(np.count_nonzero(bg_ring)) >= 60 else 0.0
+    local_table_z = (
+        float(np.median(pts_base[bg_ring, 2])) if int(np.count_nonzero(bg_ring)) >= 60 else 0.0
+    )
 
     # Upright M12 screw reaches 45.0 mm height; select elevated shaft points (z > 20 mm)
     shaft_mask = (
@@ -428,7 +430,7 @@ def detect_screw_near(
     center_xy = np.median(tip_pts[:, :2], axis=0) if len(tip_pts) >= 20 else top_xy
 
     try:
-        validate_xy_in_workspace(center_xy, "感知到的固定螺丝中心", workspace_bounds)
+        validate_xy_in_workspace(center_xy, "Detected screw center", workspace_bounds)
     except PerceptionError:
         return None, {
             "t_base_cam": t_base_cam,
@@ -472,7 +474,7 @@ def detect_nut_and_screw_overview(
         workspace_bounds=workspace_bounds,
     )
     if screw_est is None:
-        raise PerceptionError(f"全局视野未检测到桌面固定螺丝 (原因: {screw_dbg.get('reason')})")
+        raise PerceptionError(f"Screw not found in the overview image ({screw_dbg.get('reason')})")
 
     nut_est, nut_dbg = detect_nut_near(
         color_bgr,
@@ -486,7 +488,7 @@ def detect_nut_and_screw_overview(
         workspace_bounds=workspace_bounds,
     )
     if nut_est is None:
-        raise PerceptionError(f"全局视野未检测到桌面六角法兰螺母 (原因: {nut_dbg.get('reason')})")
+        raise PerceptionError(f"Nut not found in the overview image ({nut_dbg.get('reason')})")
 
     debug_info = {
         "t_base_cam": nut_dbg["t_base_cam"],
@@ -526,8 +528,11 @@ def verify_threaded_nut(
     fg_all = fg_mask[valid_d]
 
     dist_to_screw = np.linalg.norm(pts_base[:, :2] - s_xy, axis=1)
-    bg_ring = (~fg_all) & (dist_to_screw >= 0.025) & (dist_to_screw <= 0.095) & (
-        np.abs(pts_base[:, 2] - table_z_m) < 0.030
+    bg_ring = (
+        (~fg_all)
+        & (dist_to_screw >= 0.025)
+        & (dist_to_screw <= 0.095)
+        & (np.abs(pts_base[:, 2] - table_z_m) < 0.030)
     )
     local_table_z = (
         float(np.median(pts_base[bg_ring, 2]))
@@ -560,7 +565,9 @@ def verify_threaded_nut(
     rel_z = assembly_pts[:, 2] - local_table_z if len(assembly_pts) else np.zeros(0)
 
     # Points on the nut flange/hex body outside the 12 mm screw shaft (r in [6.8, 16.5] mm, z >= 13 mm)
-    r_from_screw = np.linalg.norm(assembly_pts[:, :2] - s_xy, axis=1) if len(assembly_pts) else np.zeros(0)
+    r_from_screw = (
+        np.linalg.norm(assembly_pts[:, :2] - s_xy, axis=1) if len(assembly_pts) else np.zeros(0)
+    )
     nut_ring_mask = (r_from_screw >= 0.0068) & (r_from_screw <= 0.0165) & (rel_z >= 0.013)
     nut_ring_pts = assembly_pts[nut_ring_mask]
     nut_ring_count = len(nut_ring_pts)
@@ -583,15 +590,15 @@ def verify_threaded_nut(
     expected_nut_top_mm = float(expected_nut_bottom_z_mm) + NUT_HEIGHT_MM
     reasons: list[str] = []
     if nut_ring_count < 40:
-        reasons.append(f"固定螺丝处未检测到螺母法兰/六角环点云 ({nut_ring_count} < 40)")
+        reasons.append(f"no nut ring found on the screw ({nut_ring_count} < 40 points)")
     if xy_error_mm > 15.0:
-        reasons.append(f"螺母与螺丝水平同心偏差过大 ({xy_error_mm:.1f} mm > 15.0 mm)")
+        reasons.append(f"nut-to-screw XY offset too large ({xy_error_mm:.1f} mm > 15.0 mm)")
     if nut_ring_count >= 40 and abs(nut_top_height_mm - expected_nut_top_mm) > 9.0:
         reasons.append(
-            f"螺母顶面高度异常 ({nut_top_height_mm:.1f} mm，期望 ~{expected_nut_top_mm:.1f} mm)"
+            f"unexpected nut top height ({nut_top_height_mm:.1f} mm, expected ~{expected_nut_top_mm:.1f} mm)"
         )
     if not cleared_initial:
-        reasons.append("初始抓取位置仍有螺母残留点云，疑似漏抓")
+        reasons.append("nut still present at its initial position")
 
     ok = len(reasons) == 0
     ver = ThreadedNutVerification(
@@ -637,7 +644,7 @@ def save_detection_overlay(
             cv2.drawMarker(canvas, tuple(nut_uv), (0, 255, 0), cv2.MARKER_CROSS, 16, 2, cv2.LINE_AA)
             cv2.putText(
                 canvas,
-                f"Nut ({nut_est.xy_m[0]*1000:.1f},{nut_est.xy_m[1]*1000:.1f})mm yaw={nut_est.yaw_deg:.1f}deg",
+                f"Nut ({nut_est.xy_m[0] * 1000:.1f},{nut_est.xy_m[1] * 1000:.1f})mm yaw={nut_est.yaw_deg:.1f}deg",
                 (int(nut_uv[0]) - 80, int(nut_uv[1]) - 26),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.52,
@@ -659,7 +666,7 @@ def save_detection_overlay(
             )
             cv2.putText(
                 canvas,
-                f"Screw ({screw_est.xy_m[0]*1000:.1f},{screw_est.xy_m[1]*1000:.1f})mm h={screw_est.height_mm:.1f}mm",
+                f"Screw ({screw_est.xy_m[0] * 1000:.1f},{screw_est.xy_m[1] * 1000:.1f})mm h={screw_est.height_mm:.1f}mm",
                 (int(screw_uv[0]) - 80, int(screw_uv[1]) + 34),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.52,
@@ -722,4 +729,3 @@ def save_post_thread_overlay(
     out.parent.mkdir(parents=True, exist_ok=True)
     cv2.imwrite(str(out), canvas)
     return out
-

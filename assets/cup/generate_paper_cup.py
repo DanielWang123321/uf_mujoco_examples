@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: BSD-3-Clause
+# Copyright (c) 2026, UFACTORY Inc.
 """Generate 1:1 3D meshes (OBJ/STL) and MuJoCo MJCF model for a paper cup.
 
 Dimensions:
@@ -98,9 +100,9 @@ def write_obj(path: Path, vertices: np.ndarray, faces: np.ndarray) -> None:
     lines = [
         "# Paper cup 3D mesh (units: meters)",
         (
-            f"# Height: {HEIGHT*1000:.1f}mm, Bottom OD: {D_BOT_OUT*1000:.1f}mm, "
-            f"Top OD: {D_TOP_OUT*1000:.1f}mm, Thickness: {THICKNESS*1000:.1f}mm, "
-            f"Mass: {TOTAL_MASS*1000:.2f}g"
+            f"# Height: {HEIGHT * 1000:.1f}mm, Bottom OD: {D_BOT_OUT * 1000:.1f}mm, "
+            f"Top OD: {D_TOP_OUT * 1000:.1f}mm, Thickness: {THICKNESS * 1000:.1f}mm, "
+            f"Mass: {TOTAL_MASS * 1000:.2f}g"
         ),
         "o paper_cup",
     ]
@@ -108,7 +110,7 @@ def write_obj(path: Path, vertices: np.ndarray, faces: np.ndarray) -> None:
         lines.append(f"v {v[0]:.6f} {v[1]:.6f} {v[2]:.6f}")
     for f in faces:
         # OBJ indices are 1-based
-        lines.append(f"f {f[0]+1} {f[1]+1} {f[2]+1}")
+        lines.append(f"f {f[0] + 1} {f[1] + 1} {f[2] + 1}")
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 

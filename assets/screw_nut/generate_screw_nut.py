@@ -1,15 +1,17 @@
 #!/usr/bin/env python3
-"""Generate 1:1 3D meshes (OBJ/STL) and MuJoCo MJCF models for the 0.0.3 screw and nut.
+# SPDX-License-Identifier: BSD-3-Clause
+# Copyright (c) 2026, UFACTORY Inc.
+"""Generate 1:1 3D meshes (OBJ/STL) and MuJoCo MJCF models for the screw and nut.
 
-Specifications (from prd.md 0.0.3 + Orbbec Gemini 305 multi-view RGB-D scan):
-1. Screw (螺丝):
+Specifications (measured parts + Orbbec Gemini 305 multi-view RGB-D scan):
+1. Screw:
    - Total mass: 56.5 g (0.056500 kg)
    - Total length: 45.0 mm (0.045 m)
    - Head length: 14.0 mm (0.014 m), Head outer diameter: 20.0 mm (0.020 m)
    - Thread shaft length: 31.0 mm (0.031 m), Thread outer diameter: 12.0 mm (0.012 m)
    - 12 helical thread ridges (pitch 2.40 mm) with 1.4 mm top lead-in chamfer
 
-2. Nut (六角法兰螺母):
+2. Hex flange nut:
    - Total mass: 29.0 g (0.029000 kg)
    - Bottom flange outer diameter: 29.0 mm (0.029 m)
    - Top body outer diameter: 20.0 mm (0.020 m)
@@ -629,7 +631,9 @@ def main() -> None:
     (out_dir / "nut.xml").write_text(build_nut_mjcf(), encoding="utf-8")
     (out_dir / "screw_nut.xml").write_text(build_combined_mjcf(), encoding="utf-8")
 
-    print(f"Generated screw: {len(screw_v)} vertices, {len(screw_f)} faces -> {out_dir / 'screw.obj'}")
+    print(
+        f"Generated screw: {len(screw_v)} vertices, {len(screw_f)} faces -> {out_dir / 'screw.obj'}"
+    )
     print(f"Generated nut:   {len(nut_v)} vertices, {len(nut_f)} faces -> {out_dir / 'nut.obj'}")
     print(f"Generated MJCF:  screw.xml, nut.xml, screw_nut.xml in {out_dir}")
 

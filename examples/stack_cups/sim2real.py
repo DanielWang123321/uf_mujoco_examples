@@ -1,24 +1,47 @@
-"""Sim-to-Real digital twin preflight, trajectory verification, and hardware execution for stack_cups."""
+# SPDX-License-Identifier: BSD-3-Clause
+# Copyright (c) 2026, UFACTORY Inc.
+"""Sim-to-Real pipeline for stack_cups: perception, digital-twin preflight, and hardware execution.
+
+Modes: ``dry-run`` (camera + digital twin, no motion), ``sdk-sim`` (xArm controller simulation),
+``real`` (one cycle on hardware, requires ``--confirm-real``). In ``real`` mode with camera
+detection, the wrist camera re-measures each cup from directly above before grasping it.
+"""
 
 from __future__ import annotations
 
-import hashlib
-import json
-import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import mujoco
 import numpy as np
+from ufactory_mujoco.calibration import KinematicsCalibration, load_kinematics_calibration
+from ufactory_mujoco.collision import CollisionChecker
+from ufactory_mujoco.safety import (
+    SafetyGateError,
+    authorize_real_motion,
+    enforce_single_cycle,
+    run_sdk_simulation,
+    stream_sha256,
+)
+from ufactory_mujoco.task_geometry import GRIP_DOWN_QUAT
+from ufactory_mujoco.xarm_robot import XArmRobot
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "ufactory_mujoco"))
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+from common.geometry import yaw_rotate_quat
+from common.motion import (
+    interpolate_waypoint_chain,
+    read_real_gripper_gap_mm,
+    solve_cartesian_segment,
+    stream_waypoints_on_real,
+)
+from common.objects.paper_cup import GRASP_AXIS_OFFSET_M
+from common.paths import DEFAULT_CALIBRATION_YAML, DEFAULT_HANDEYE_YAML, DEFAULT_ROBOT_IP
+from common.sim2real import config_sha256, flange_pose, make_collision_checker, write_json_report
+from common.vision import solve_camera_lookdown_q as _solve_camera_lookdown_q
 
-from perception import (
-    DEFAULT_HANDEYE_YAML,
+from . import stack_cups as task
+from .perception import (
     WORKSPACE_BOUNDS_M,
     CupPoseEstimate,
     OrbbecCameraStream,
@@ -32,45 +55,7 @@ from perception import (
     validate_xy_in_workspace,
     verify_stacked_cups,
 )
-from ufactory_mujoco.calibration import (
-    KinematicsCalibration,
-    apply_calibration_to_model,
-    load_kinematics_calibration,
-)
-from ufactory_mujoco.collision import CollisionChecker
-from ufactory_mujoco.safety import (
-    SafetyGateError,
-    authorize_real_motion,
-    enforce_single_cycle,
-    run_sdk_simulation,
-    stream_sha256,
-)
-from ufactory_mujoco.xarm_robot import XArmRobot
 
-from common.motion import (
-    interpolate_waypoint_chain as _interpolate_waypoint_chain,
-)
-from common.motion import (
-    read_real_gripper_gap_mm as _read_real_gripper_gap_mm,
-)
-from common.motion import (
-    solve_cartesian_segment as _solve_cartesian_segment,
-)
-from common.motion import (
-    stream_waypoints_on_real as _stream_waypoints_on_real,
-)
-from common.vision import solve_camera_lookdown_q as _solve_camera_lookdown_q_common
-
-if TYPE_CHECKING:
-    from stack_cups import CupCycleWaypoints
-
-DEFAULT_ROBOT_IP = "192.168.1.60"
-DEFAULT_CALIBRATION_YAML = (
-    Path(__file__).resolve().parents[3]
-    / "ufactory_mujoco"
-    / "calibrations"
-    / "xarm6_kinematics_L56A01.yaml"
-)
 CANDIDATE_REAL_TARGETS_XY: tuple[tuple[float, float], ...] = (
     (0.36, -0.06),
     (0.38, -0.18),
@@ -103,7 +88,7 @@ class MultiCupTwinReport:
     max_joint_step_rad: float
     waypoint_count: int
     shadow_stream_rad: np.ndarray
-    cycles: list[CupCycleWaypoints]
+    cycles: list[task.CupCycleWaypoints]
     failures: tuple[str, ...] = ()
 
     def as_dict(self) -> dict[str, Any]:
@@ -126,19 +111,8 @@ def make_stack_collision_checker(
     scene_path: str | Path,
     calibration: KinematicsCalibration | None = None,
 ) -> CollisionChecker:
-    """Create a CollisionChecker that checks self-collision and arm/gripper vs table collision."""
-    import stack_cups as demo
-
-    checker = CollisionChecker(
-        scene_path,
-        safety_margin=0.0,
-        query_margin=0.01,
-        ignore_pairs=[("world", "link_base"), ("world", "link1")],
-        ignore_bodies=demo.ALL_CUP_BODIES,
-    )
-    if calibration is not None:
-        apply_calibration_to_model(checker.model, calibration, checker.data)
-    return checker
+    """Arm self-collision and arm/gripper-vs-table checker (all cups are ignored)."""
+    return make_collision_checker(scene_path, calibration, ignore_bodies=task.ALL_CUP_BODIES)
 
 
 def _min_distance_to_cups(
@@ -161,29 +135,31 @@ def select_safe_stack_target_xy(
 ) -> np.ndarray:
     """Choose and validate a safe stacking target XY separated from all detected cups."""
     if not cup_poses:
-        raise SafetyGateError("未提供任何纸杯位姿，无法规划堆叠目标位置")
+        raise SafetyGateError("No cup poses given; cannot plan a stack target")
 
     if requested_target_xy is not None:
         target = np.asarray(requested_target_xy, dtype=np.float64).reshape(2)
-        validate_xy_in_workspace(target, "指定的目标堆叠位置", bounds)
+        validate_xy_in_workspace(target, "Requested stack target", bounds)
         min_d = _min_distance_to_cups(target, cup_poses)
         if min_d < MIN_PICK_PLACE_SEPARATION_M:
             raise SafetyGateError(
-                f"目标堆叠位置 ({target[0]:.3f}, {target[1]:.3f}) m 与待抓纸杯距离过近 "
-                f"({min_d * 1000:.1f} mm < {MIN_PICK_PLACE_SEPARATION_M * 1000:.0f} mm)，存在碰撞风险"
+                f"Stack target ({target[0]:.3f}, {target[1]:.3f}) m is too close to a cup "
+                f"({min_d * 1000:.1f} mm < {MIN_PICK_PLACE_SEPARATION_M * 1000:.0f} mm)"
             )
         return target
 
     valid_candidates: list[tuple[float, np.ndarray]] = []
     for cand_xy in CANDIDATE_REAL_TARGETS_XY:
         cand = np.asarray(cand_xy, dtype=np.float64)
-        validate_xy_in_workspace(cand, "候选目标堆叠位置", bounds)
+        validate_xy_in_workspace(cand, "Candidate stack target", bounds)
         min_d = _min_distance_to_cups(cand, cup_poses)
         if min_d >= MIN_PICK_PLACE_SEPARATION_M:
             valid_candidates.append((min_d, cand))
 
     if not valid_candidates:
-        raise SafetyGateError("默认候选堆叠位置均与当前纸杯距离过近，请使用 --target-xy 指定净空目标点")
+        raise SafetyGateError(
+            "All default stack targets are too close to the cups; pass a clear one with --target-xy"
+        )
 
     # Prefer the first candidate if it has ample clearance (>= 145 mm), otherwise pick max clearance
     if valid_candidates[0][0] >= 0.145:
@@ -194,7 +170,7 @@ def select_safe_stack_target_xy(
 
 def _build_multi_cup_shadow_stream(
     q_init: np.ndarray,
-    cycles: list[CupCycleWaypoints],
+    cycles: list[task.CupCycleWaypoints],
     *,
     dt: float = 0.02,
     max_vel_rad_s: float = 0.65,
@@ -207,7 +183,7 @@ def _build_multi_cup_shadow_stream(
 
     # Phase 1: Initial approach from observation pose to Cup #1 grasp pose
     if cycles[0].approach_waypoints:
-        seg = _interpolate_waypoint_chain(
+        seg = interpolate_waypoint_chain(
             q_cur,
             cycles[0].approach_waypoints,
             dt=dt,
@@ -221,7 +197,7 @@ def _build_multi_cup_shadow_stream(
     for idx, cycle in enumerate(cycles):
         # Lift, 90-degree flip, and soft-landing placement / nesting
         if cycle.lift_flip_place_waypoints:
-            seg = _interpolate_waypoint_chain(
+            seg = interpolate_waypoint_chain(
                 q_cur,
                 cycle.lift_flip_place_waypoints,
                 dt=dt,
@@ -236,7 +212,7 @@ def _build_multi_cup_shadow_stream(
         if idx < len(cycles) - 1:
             merged_wps = list(cycle.retreat_waypoints) + list(cycles[idx + 1].approach_waypoints)
             if merged_wps:
-                seg = _interpolate_waypoint_chain(
+                seg = interpolate_waypoint_chain(
                     q_cur,
                     merged_wps,
                     dt=dt,
@@ -247,7 +223,7 @@ def _build_multi_cup_shadow_stream(
                     chunks.append(seg[1:])
                     q_cur = seg[-1].copy()
         elif cycle.retreat_waypoints:
-            seg = _interpolate_waypoint_chain(
+            seg = interpolate_waypoint_chain(
                 q_cur,
                 cycle.retreat_waypoints,
                 dt=dt,
@@ -271,14 +247,12 @@ def run_digital_twin_preflight(
     headless: bool = False,
 ) -> MultiCupTwinReport:
     """Execute the full multi-cup pick, flip, and coaxial stack in the calibrated MuJoCo twin."""
-    import stack_cups as demo
-
     handeye = load_handeye_calibration(handeye_yaml)
     x_flange_cam = np.asarray(handeye["extrinsics"]["X_flange_cam"], dtype=np.float64)
-    checker = make_stack_collision_checker(demo.SCENE, calibration=calibration)
+    checker = make_stack_collision_checker(task.SCENE, calibration=calibration)
 
     q_start = np.asarray(q_init, dtype=np.float64).reshape(6).copy()
-    cycles: list[demo.CupCycleWaypoints] = []
+    cycles: list[task.CupCycleWaypoints] = []
     failures: list[str] = []
     min_cam_z_m = float("inf")
     min_col_dist_m = float("inf")
@@ -286,7 +260,7 @@ def run_digital_twin_preflight(
     table_z_ref = float(cup_poses[0].table_z_m) if cup_poses else 0.0
 
     initial_poses = [
-        demo.InitialCupPose(
+        task.InitialCupPose(
             bottom_xy_m=c.cup_bottom_xy_m,
             yaw_deg=c.yaw_deg,
             table_z_m=c.table_z_m,
@@ -294,15 +268,11 @@ def run_digital_twin_preflight(
         for c in cup_poses
     ]
 
-    with demo.StackCupRobot(viewer=not headless, calibration=calibration) as sim_robot:
-        link6_id = mujoco.mj_name2id(sim_robot.model, mujoco.mjtObj.mjOBJ_BODY, "link6")
+    with task.StackCupRobot(viewer=not headless, calibration=calibration) as sim_robot:
 
         def update_camera_clearance() -> None:
             nonlocal min_cam_z_m
-            t_flange = np.eye(4, dtype=np.float64)
-            t_flange[:3, :3] = sim_robot.data.xmat[link6_id].reshape(3, 3)
-            t_flange[:3, 3] = sim_robot.data.xpos[link6_id]
-            t_cam = t_flange @ x_flange_cam
+            t_cam = flange_pose(sim_robot.model, sim_robot.data) @ x_flange_cam
             min_cam_z_m = min(min_cam_z_m, float(t_cam[2, 3]) - table_z_ref)
 
         orig_step = sim_robot._step
@@ -314,7 +284,7 @@ def run_digital_twin_preflight(
         sim_robot._step = monitored_step  # type: ignore[method-assign]
 
         try:
-            metrics = demo.run_stack_cups(
+            metrics = task.run_stack_cups(
                 sim_robot,
                 num_cups=len(cup_poses),
                 cup_poses=initial_poses,
@@ -323,7 +293,7 @@ def run_digital_twin_preflight(
                 recorded_cycles=cycles,
             )
         except Exception as exc:  # noqa: BLE001
-            failures.append(f"多纸杯数字孪生仿真预演失败: {exc}")
+            failures.append(f"Digital-twin rollout failed: {exc}")
 
     # Append final return-to-observation waypoint at the end of the last cup's retreat
     if not failures and cycles:
@@ -331,39 +301,33 @@ def run_digital_twin_preflight(
 
     shadow_stream = _build_multi_cup_shadow_stream(q_start, cycles)
     max_step_rad = (
-        float(np.max(np.abs(np.diff(shadow_stream, axis=0))))
-        if len(shadow_stream) > 1
-        else 0.0
+        float(np.max(np.abs(np.diff(shadow_stream, axis=0)))) if len(shadow_stream) > 1 else 0.0
     )
 
     fk_model = checker.model
     fk_data = mujoco.MjData(fk_model)
-    link6_fk_id = mujoco.mj_name2id(fk_model, mujoco.mjtObj.mjOBJ_BODY, "link6")
     for idx, q_sample in enumerate(shadow_stream):
         if np.any(q_sample < checker.q_lo - 1e-6) or np.any(q_sample > checker.q_hi + 1e-6):
-            failures.append(f"轨迹采样点 #{idx} 超出关节限位")
+            failures.append(f"Stream sample #{idx} exceeds joint limits")
             break
         dist = float(checker.min_distance(q_sample))
         min_col_dist_m = min(min_col_dist_m, dist)
         if checker.in_collision(q_sample):
-            failures.append(f"轨迹采样点 #{idx} 检测到碰撞 (min_dist={dist * 1000:.2f} mm)")
+            failures.append(f"Stream sample #{idx} is in collision (min_dist={dist * 1000:.2f} mm)")
             break
         fk_data.qpos[:6] = q_sample
         mujoco.mj_forward(fk_model, fk_data)
-        t_flange = np.eye(4, dtype=np.float64)
-        t_flange[:3, :3] = fk_data.xmat[link6_fk_id].reshape(3, 3)
-        t_flange[:3, 3] = fk_data.xpos[link6_fk_id]
-        t_cam = t_flange @ x_flange_cam
+        t_cam = flange_pose(fk_model, fk_data) @ x_flange_cam
         cam_clear = float(t_cam[2, 3]) - table_z_ref
         min_cam_z_m = min(min_cam_z_m, cam_clear)
 
     if min_cam_z_m < MIN_CAMERA_TABLE_CLEARANCE_M:
         failures.append(
-            f"腕部相机最低离桌高度 {min_cam_z_m * 1000:.1f} mm 低于安全阈值 "
+            f"Wrist camera table clearance {min_cam_z_m * 1000:.1f} mm is below "
             f"{MIN_CAMERA_TABLE_CLEARANCE_M * 1000:.1f} mm"
         )
     if max_step_rad > 0.15:
-        failures.append(f"相邻轨迹步关节角跨度过大 ({max_step_rad:.4f} rad > 0.15 rad)")
+        failures.append(f"Joint step between samples too large ({max_step_rad:.4f} rad > 0.15 rad)")
 
     total_wps = sum(
         len(c.approach_waypoints) + len(c.lift_flip_place_waypoints) + len(c.retreat_waypoints)
@@ -394,55 +358,51 @@ def solve_camera_lookdown_q(
     handeye_yaml: str | Path = DEFAULT_HANDEYE_YAML,
 ) -> np.ndarray:
     """Solve collision-free joint angles that place the Eye-in-Hand camera directly over cup_center_xy_m."""
-    import stack_cups as demo
-
-    return _solve_camera_lookdown_q_common(
+    return _solve_camera_lookdown_q(
         cup_center_xy_m,
         z_cam_m=z_cam_m,
         q_seed=q_seed,
-        scene_path=demo.SCENE,
+        scene_path=task.SCENE,
         calibration=calibration,
         handeye_yaml=handeye_yaml,
-        ignore_bodies=demo.ALL_CUP_BODIES,
+        ignore_bodies=task.ALL_CUP_BODIES,
     )
 
 
 def replan_single_cup_cycle(
-    base_cycle: CupCycleWaypoints,
+    base_cycle: task.CupCycleWaypoints,
     refined_pose: CupPoseEstimate,
     target_xy_m: np.ndarray,
     *,
     q_start: np.ndarray,
     calibration: KinematicsCalibration | None = None,
     handeye_yaml: str | Path = DEFAULT_HANDEYE_YAML,
-) -> CupCycleWaypoints:
+) -> task.CupCycleWaypoints:
     """Recompute and collision-verify a single cup's pick & lift waypoints from refined_pose."""
-    import stack_cups as demo
-
     handeye = load_handeye_calibration(handeye_yaml)
     x_flange_cam = np.asarray(handeye["extrinsics"]["X_flange_cam"], dtype=np.float64)
-    checker = make_stack_collision_checker(demo.SCENE, calibration=calibration)
+    checker = make_stack_collision_checker(task.SCENE, calibration=calibration)
     tgt_xy = np.asarray(target_xy_m, dtype=np.float64).reshape(2)
 
     yaw_rad = float(np.deg2rad(refined_pose.yaw_deg))
     axis = np.array([np.cos(yaw_rad), np.sin(yaw_rad), 0.0], dtype=np.float64)
     bot_xy = np.asarray(refined_pose.cup_bottom_xy_m, dtype=np.float64).reshape(2)
     table_z = float(refined_pose.table_z_m)
-    grasp_center = bot_xy + demo.GRASP_AXIS_OFFSET_M * axis[:2]
-    grasp = np.array([grasp_center[0], grasp_center[1], table_z + demo.GRASP_TCP_Z_M])
+    grasp_center = bot_xy + GRASP_AXIS_OFFSET_M * axis[:2]
+    grasp = np.array([grasp_center[0], grasp_center[1], table_z + task.GRASP_TCP_Z_M])
     approach = np.array([grasp_center[0], grasp_center[1], table_z + 0.16])
-    grasp_quat = demo._yaw_rotate_quat(yaw_rad, demo.GRIP_DOWN_QUAT)
+    grasp_quat = yaw_rotate_quat(yaw_rad, GRIP_DOWN_QUAT)
 
-    with demo.StackCupRobot(viewer=False, calibration=calibration) as sim_robot:
+    with task.StackCupRobot(viewer=False, calibration=calibration) as sim_robot:
         q_full = sim_robot.data.qpos.copy()
         q_full[:6] = np.asarray(q_start, dtype=np.float64).reshape(6)
         q_app, ok = sim_robot.solve_tcp(approach, grasp_quat, q_init=q_full)
         if not ok:
-            raise SafetyGateError(f"闭环修正后接近点逆解未收敛: {approach}")
-        grasp_wps = _solve_cartesian_segment(sim_robot, q_app[:6], grasp, grasp_quat, steps=30)
+            raise SafetyGateError(f"IK did not converge for the refined approach pose {approach}")
+        grasp_wps = solve_cartesian_segment(sim_robot, q_app[:6], grasp, grasp_quat, steps=30)
         new_approach = [np.asarray(q_app[:6], dtype=np.float64).copy()] + grasp_wps
 
-        lift_wps = _solve_cartesian_segment(
+        lift_wps = solve_cartesian_segment(
             sim_robot,
             grasp_wps[-1],
             grasp + np.array([0.0, 0.0, 0.14], dtype=np.float64),
@@ -450,37 +410,32 @@ def replan_single_cup_cycle(
             steps=28,
         )
         place_side = -1.0 if tgt_xy[1] <= 0.0 else 1.0
-        pre_flip_quat = demo._yaw_rotate_quat(place_side * 0.5 * np.pi, demo.GRIP_DOWN_QUAT)
+        pre_flip_quat = yaw_rotate_quat(place_side * 0.5 * np.pi, GRIP_DOWN_QUAT)
         mid_pos = np.array([0.36, -0.05 * place_side, table_z + 0.22], dtype=np.float64)
-        mid_wps = _solve_cartesian_segment(
-            sim_robot, lift_wps[-1], mid_pos, pre_flip_quat, steps=35
-        )
-        new_lift_flip_place = (
-            lift_wps + mid_wps + list(base_cycle.lift_flip_place_waypoints[63:])
-        )
+        mid_wps = solve_cartesian_segment(sim_robot, lift_wps[-1], mid_pos, pre_flip_quat, steps=35)
+        # Reuse the twin's flip/place waypoints that follow its lift (28) + pre-flip (35) steps.
+        new_lift_flip_place = lift_wps + mid_wps + list(base_cycle.lift_flip_place_waypoints[63:])
 
     # Verify every 50 Hz sample of the updated trajectory segments
-    s_app = _interpolate_waypoint_chain(q_start, new_approach, soft_landing=True)
-    s_lfp = _interpolate_waypoint_chain(new_approach[-1], new_lift_flip_place, soft_landing=True)
+    s_app = interpolate_waypoint_chain(q_start, new_approach, soft_landing=True)
+    s_lfp = interpolate_waypoint_chain(new_approach[-1], new_lift_flip_place, soft_landing=True)
     full_check = np.vstack([s_app, s_lfp[1:]])
     fk_model = checker.model
     fk_data = mujoco.MjData(fk_model)
-    link6_fk_id = mujoco.mj_name2id(fk_model, mujoco.mjtObj.mjOBJ_BODY, "link6")
     for idx_s, q_s in enumerate(full_check):
         if np.any(q_s < checker.q_lo - 1e-6) or np.any(q_s > checker.q_hi + 1e-6):
-            raise SafetyGateError(f"闭环重规划采样点 #{idx_s} 超出关节限位")
+            raise SafetyGateError(f"Replanned sample #{idx_s} exceeds joint limits")
         if checker.in_collision(q_s):
-            raise SafetyGateError(f"闭环重规划采样点 #{idx_s} 检测到碰撞风险")
+            raise SafetyGateError(f"Replanned sample #{idx_s} is in collision")
         fk_data.qpos[:6] = q_s
         mujoco.mj_forward(fk_model, fk_data)
-        t_bf = np.eye(4, dtype=np.float64)
-        t_bf[:3, :3] = fk_data.xmat[link6_fk_id].reshape(3, 3)
-        t_bf[:3, 3] = fk_data.xpos[link6_fk_id]
-        t_bc = t_bf @ x_flange_cam
+        t_bc = flange_pose(fk_model, fk_data) @ x_flange_cam
         if float(t_bc[2, 3]) - table_z < MIN_CAMERA_TABLE_CLEARANCE_M:
-            raise SafetyGateError("闭环重规划采样点腕部相机离桌高度过低")
+            raise SafetyGateError(
+                "Replanned trajectory brings the wrist camera too close to the table"
+            )
 
-    return demo.CupCycleWaypoints(
+    return task.CupCycleWaypoints(
         cup_name=base_cycle.cup_name,
         approach_waypoints=new_approach,
         lift_flip_place_waypoints=new_lift_flip_place,
@@ -496,6 +451,7 @@ def run_sim2real_pipeline(
     ip: str = DEFAULT_ROBOT_IP,
     calibration_path: str | Path = DEFAULT_CALIBRATION_YAML,
     handeye_path: str | Path = DEFAULT_HANDEYE_YAML,
+    camera_serial: str = "",
     cup_poses_override: list[float] | tuple[float, ...] | None = None,
     target_xy_override: tuple[float, float] | None = None,
     headless: bool = False,
@@ -507,10 +463,8 @@ def run_sim2real_pipeline(
     report_path: str | Path | None = None,
 ) -> dict[str, Any]:
     """Run the end-to-end multi-cup stacking Sim-to-Real pipeline (dry-run, sdk-sim, or real)."""
-    import stack_cups as demo
-
     if mode not in ("dry-run", "sdk-sim", "real"):
-        raise ValueError(f"不支持的硬件运行模式: {mode!r}")
+        raise ValueError(f"Unsupported hardware mode: {mode!r}")
     enforce_single_cycle(cycles, mode)
 
     calib = load_kinematics_calibration(calibration_path, robot="xarm6")
@@ -519,15 +473,12 @@ def run_sim2real_pipeline(
         ip,
         robot="xarm6",
         gripper="gripper_g2",
-        model_path=demo.SCENE,
+        model_path=task.SCENE,
         calibration=calib,
         read_only=True,
     ) as robot:
         q_obs = robot.get_joint_positions()
-        link6_id = mujoco.mj_name2id(robot.model, mujoco.mjtObj.mjOBJ_BODY, "link6")
-        t_base_flange = np.eye(4, dtype=np.float64)
-        t_base_flange[:3, :3] = robot.data.xmat[link6_id].reshape(3, 3)
-        t_base_flange[:3, 3] = robot.data.xpos[link6_id]
+        t_base_flange = flange_pose(robot.model, robot.data)
 
         # Step 1: Acquire multiple cup 6D poses (from Eye-in-Hand Gemini 305 or manual override)
         color_bgr: np.ndarray | None = None
@@ -538,19 +489,19 @@ def run_sim2real_pipeline(
                 cup_poses = pose_estimates_from_manual(cup_poses_override, num_cups=num_cups)
                 for idx, cp in enumerate(cup_poses, start=1):
                     print(
-                        f"[感知] 手动指定纸杯 #{idx}: 杯底=({cp.cup_bottom_xy_m[0]:.3f}, "
-                        f"{cp.cup_bottom_xy_m[1]:.3f}) m, 偏航角={cp.yaw_deg:.1f}°",
+                        f"[Perception] Manual cup #{idx}: bottom=({cp.cup_bottom_xy_m[0]:.3f}, "
+                        f"{cp.cup_bottom_xy_m[1]:.3f}) m, yaw={cp.yaw_deg:.1f} deg",
                         flush=True,
                     )
             else:
                 if mode == "real":
-                    cam_stream = OrbbecCameraStream()
+                    cam_stream = OrbbecCameraStream(camera_serial)
                     cam_stream.start()
                 print(
-                    f"[感知] 正在从 Orbbec Gemini 305 采集对齐 RGB-D 帧并识别 {num_cups} 个纸杯 6D 位姿 ...",
+                    f"[Perception] Capturing RGB-D from Orbbec Gemini 305 to detect {num_cups} cups ...",
                     flush=True,
                 )
-                color_bgr, depth_m, _ = capture_rgbd_frame(stream=cam_stream)
+                color_bgr, depth_m, _ = capture_rgbd_frame(serial=camera_serial, stream=cam_stream)
                 cup_poses, debug_info = detect_sideways_cups(
                     color_bgr,
                     depth_m,
@@ -559,11 +510,12 @@ def run_sim2real_pipeline(
                     handeye_yaml=handeye_path,
                 )
                 for idx, cp in enumerate(cup_poses, start=1):
-                    role_label = "底层基准杯" if idx == 1 else f"第 {idx} 层套入杯"
+                    role_label = "base" if idx == 1 else f"nest level {idx}"
                     print(
-                        f"[感知] 纸杯 #{idx} ({role_label}): 杯底=({cp.cup_bottom_xy_m[0]:.3f}, "
-                        f"{cp.cup_bottom_xy_m[1]:.3f}) m, 杯口=({cp.cup_top_xy_m[0]:.3f}, "
-                        f"{cp.cup_top_xy_m[1]:.3f}) m, 偏航角={cp.yaw_deg:.1f}° ({cp.point_count} 点)",
+                        f"[Perception] Cup #{idx} ({role_label}): bottom=({cp.cup_bottom_xy_m[0]:.3f}, "
+                        f"{cp.cup_bottom_xy_m[1]:.3f}) m, rim=({cp.cup_top_xy_m[0]:.3f}, "
+                        f"{cp.cup_top_xy_m[1]:.3f}) m, yaw={cp.yaw_deg:.1f} deg "
+                        f"({cp.point_count} points)",
                         flush=True,
                     )
 
@@ -576,12 +528,11 @@ def run_sim2real_pipeline(
                     save_vis_path,
                     target_xy_m=target_xy,
                 )
-                print(f"[感知] 已保存多纸杯视觉检测与目标点叠加图: {vis_file}", flush=True)
+                print(f"[Perception] Saved detection overlay: {vis_file}", flush=True)
 
-            sim_mode_label = "无头模式" if headless else "3D 可视化窗口"
             print(
-                f"[规划] 目标同心堆叠位置: ({target_xy[0]:.3f}, {target_xy[1]:.3f}) m，"
-                f"开始 MuJoCo 数字孪生预演 ({sim_mode_label}) ...",
+                f"[Plan] Stack target ({target_xy[0]:.3f}, {target_xy[1]:.3f}) m; running the "
+                f"MuJoCo digital twin ({'headless' if headless else 'viewer'}) ...",
                 flush=True,
             )
 
@@ -595,33 +546,33 @@ def run_sim2real_pipeline(
                 headless=headless,
             )
             if not twin_report.ok:
-                reason_str = "；".join(twin_report.failures)
-                raise SafetyGateError(f"数字孪生安全预检未通过，已拦截硬件执行：{reason_str}")
+                reason_str = "; ".join(twin_report.failures)
+                raise SafetyGateError(
+                    f"Digital-twin preflight failed; hardware blocked: {reason_str}"
+                )
 
             steps_str = ", ".join(
                 f"{s:.1f} mm" for s in twin_report.metrics.get("nested_steps_mm", [])
             )
             print(
-                f"[预演] 数字孪生 {num_cups} 杯堆叠验证通过: 模拟落点误差={twin_report.metrics['error_mm']:.2f} mm, "
-                f"同心偏差={twin_report.metrics['coaxial_error_mm']:.2f} mm, "
-                f"嵌套高度差=[{steps_str}], "
-                f"相机最低离桌={twin_report.min_camera_z_mm:.1f} mm, "
-                f"最小防撞间距={twin_report.min_collision_dist_mm:.1f} mm",
+                f"[Preflight] Passed ({num_cups} cups): "
+                f"placement error={twin_report.metrics['error_mm']:.2f} mm, "
+                f"coaxial error={twin_report.metrics['coaxial_error_mm']:.2f} mm, "
+                f"nesting steps=[{steps_str}], "
+                f"min camera clearance={twin_report.min_camera_z_mm:.1f} mm, "
+                f"min collision distance={twin_report.min_collision_dist_mm:.1f} mm",
                 flush=True,
             )
 
             prog_hash = stream_sha256(twin_report.shadow_stream_rad)
-            cfg_hash = hashlib.sha256(
-                json.dumps(
-                    {
-                        "num_cups": num_cups,
-                        "cup_poses": [c.as_dict() for c in cup_poses],
-                        "target_xy": target_xy.tolist(),
-                        "calibration_sha256": calib.sha256,
-                    },
-                    sort_keys=True,
-                ).encode("utf-8")
-            ).hexdigest()
+            cfg_hash = config_sha256(
+                {
+                    "num_cups": num_cups,
+                    "cup_poses": [c.as_dict() for c in cup_poses],
+                    "target_xy": target_xy.tolist(),
+                    "calibration_sha256": calib.sha256,
+                }
+            )
 
             result_payload: dict[str, Any] = {
                 "mode": mode,
@@ -639,12 +590,15 @@ def run_sim2real_pipeline(
             }
 
             if mode == "dry-run":
-                _write_json_report(report_path, result_payload)
+                write_json_report(report_path, result_payload)
                 return result_payload
 
-            checker = make_stack_collision_checker(demo.SCENE, calibration=calib)
+            checker = make_stack_collision_checker(task.SCENE, calibration=calib)
             if mode == "sdk-sim":
-                print("[SDK-Sim] 正在控制器内部仿真重放多纸杯堆叠轨迹（物理关节保持静止）...", flush=True)
+                print(
+                    "[SDK-Sim] Replaying in the controller simulation (arm stays still) ...",
+                    flush=True,
+                )
                 evidence = run_sdk_simulation(
                     robot._arm,
                     robot="xarm6",
@@ -661,13 +615,13 @@ def run_sim2real_pipeline(
                 result_payload["sdk_sim"] = evidence.as_dict()
                 result_payload["ok"] = ok
                 result_payload["success"] = ok
-                _write_json_report(report_path, result_payload)
+                write_json_report(report_path, result_payload)
                 if not ok:
-                    raise SafetyGateError(f"sdk-sim 校验未通过: {evidence.failures}")
+                    raise SafetyGateError(f"sdk-sim check failed: {evidence.failures}")
                 print(
-                    f"[SDK-Sim] 验证通过: 采样点={evidence.samples}, "
-                    f"最大关节误差={evidence.max_joint_error_rad * 1000:.3f} mrad, "
-                    f"物理关节漂移={evidence.physical_joint_drift_rad * 1000:.4f} mrad",
+                    f"[SDK-Sim] Passed: samples={evidence.samples}, "
+                    f"max joint error={evidence.max_joint_error_rad * 1000:.3f} mrad, "
+                    f"physical drift={evidence.physical_joint_drift_rad * 1000:.4f} mrad",
                     flush=True,
                 )
                 return result_payload
@@ -685,7 +639,7 @@ def run_sim2real_pipeline(
             )
             robot.unlock_motion(approval)
             print(
-                f"[Real] 安全门已解锁 (单周期 MotionApproval)，开始真机 {num_cups} 杯闭环堆叠执行 ...",
+                f"[Real] Motion unlocked for one cycle; stacking {num_cups} cups ...",
                 flush=True,
             )
 
@@ -709,21 +663,21 @@ def run_sim2real_pipeline(
                         handeye_yaml=handeye_path,
                     )
                     print(
-                        f"  [杯 1/{num_cups} - 1/5] 张开 Gripper G2 并移动相机至纸杯 #1 正上方观测位 "
+                        f"  [Cup 1/{num_cups} - 1/5] Open the gripper and move the camera above cup #1 "
                         f"(z_cam={CAM_HOVER_Z_M * 1000:.0f} mm) ...",
                         flush=True,
                     )
-                    _stream_waypoints_on_real(
+                    stream_waypoints_on_real(
                         robot,
                         [q_cam_hover_1],
                         soft_landing=True,
                     )
                 else:
                     print(
-                        f"  [杯 1/{num_cups} - 1/4] 张开 Gripper G2 并平滑接近纸杯 #1 抓取位姿 ...",
+                        f"  [Cup 1/{num_cups} - 1/4] Open the gripper and approach the cup #1 grasp pose ...",
                         flush=True,
                     )
-                    _stream_waypoints_on_real(
+                    stream_waypoints_on_real(
                         robot,
                         twin_report.cycles[0].approach_waypoints,
                         soft_landing=True,
@@ -732,10 +686,10 @@ def run_sim2real_pipeline(
             for idx, cycle in enumerate(twin_report.cycles, start=1):
                 if use_closed_loop_cam:
                     q_hover_now = robot.get_joint_positions()
-                    t_bf_hover = np.eye(4, dtype=np.float64)
-                    t_bf_hover[:3, :3] = robot.data.xmat[link6_id].reshape(3, 3)
-                    t_bf_hover[:3, 3] = robot.data.xpos[link6_id]
-                    hover_bgr, hover_depth, _ = capture_rgbd_frame(stream=cam_stream)
+                    t_bf_hover = flange_pose(robot.model, robot.data)
+                    hover_bgr, hover_depth, _ = capture_rgbd_frame(
+                        serial=camera_serial, stream=cam_stream
+                    )
                     refined_cup, hover_dbg = detect_single_cup_near(
                         hover_bgr,
                         hover_depth,
@@ -754,11 +708,12 @@ def run_sim2real_pipeline(
                                 hover_bgr, [], hover_dbg, abort_vis, target_xy_m=target_xy
                             )
                         print(
-                            f"  [闭环拦截] 移动至纸杯 #{idx} 正上方复测时未检测到纸杯 "
-                            f"(原因: {hover_dbg.get('reason', 'missing')})，放弃抓取并安全退回初始位姿！",
+                            f"  [Abort] Cup #{idx} not found from the hover pose "
+                            f"(reason: {hover_dbg.get('reason', 'missing')}); "
+                            "returning to the observation pose",
                             flush=True,
                         )
-                        _stream_waypoints_on_real(robot, [q_obs], soft_landing=True)
+                        stream_waypoints_on_real(robot, [q_obs], soft_landing=True)
                         q_end_abort = robot.get_joint_positions()
                         result_payload.update(
                             confirm_real=True,
@@ -774,7 +729,7 @@ def run_sim2real_pipeline(
                             success=False,
                             completed=False,
                         )
-                        _write_json_report(report_path, result_payload)
+                        write_json_report(report_path, result_payload)
                         return result_payload
 
                     delta_xy_mm = float(
@@ -786,10 +741,11 @@ def run_sim2real_pipeline(
                     )
                     delta_yaw_deg = float(refined_cup.yaw_deg - cup_poses[idx - 1].yaw_deg)
                     print(
-                        f"  [杯 {idx}/{num_cups} - 2/5] 正视闭环确认纸杯在位 ({refined_cup.point_count} 点): "
-                        f"精修杯底=({refined_cup.cup_bottom_xy_m[0]:.3f}, "
-                        f"{refined_cup.cup_bottom_xy_m[1]:.3f}) m, 偏航角={refined_cup.yaw_deg:.1f}° "
-                        f"(修正 Δxy={delta_xy_mm:.1f} mm, Δyaw={delta_yaw_deg:+.1f}°)",
+                        f"  [Cup {idx}/{num_cups} - 2/5] Cup confirmed from above "
+                        f"({refined_cup.point_count} points): refined bottom="
+                        f"({refined_cup.cup_bottom_xy_m[0]:.3f}, "
+                        f"{refined_cup.cup_bottom_xy_m[1]:.3f}) m, yaw={refined_cup.yaw_deg:.1f} deg "
+                        f"(correction dxy={delta_xy_mm:.1f} mm, dyaw={delta_yaw_deg:+.1f} deg)",
                         flush=True,
                     )
                     if save_vis_path is not None:
@@ -819,25 +775,26 @@ def run_sim2real_pipeline(
                         handeye_yaml=handeye_path,
                     )
                     print(
-                        f"  [杯 {idx}/{num_cups} - 3/5] 轨迹在线修正通过，平滑下探至纸杯 #{idx} 抓取位 ...",
+                        f"  [Cup {idx}/{num_cups} - 3/5] Replanned trajectory passed; "
+                        f"descending to the cup #{idx} grasp pose ...",
                         flush=True,
                     )
-                    _stream_waypoints_on_real(
+                    stream_waypoints_on_real(
                         robot,
                         cycle.approach_waypoints,
                         soft_landing=True,
                     )
 
                 action_desc = (
-                    "软着陆竖放底层基准杯"
+                    "place it upright as the base cup"
                     if idx == 1
-                    else f"同心对准并软着陆套入第 {idx - 1} 杯内"
+                    else f"nest it into cup #{idx - 1}"
                 )
                 step_tag = "4/5" if use_closed_loop_cam else "2/4"
                 print(
-                    f"  [杯 {idx}/{num_cups} - {step_tag}] 柔顺闭合 Gripper G2 "
-                    f"(目标间隙={grasp_gap_mm:.1f} mm, 速度={REAL_GRASP_SPEED_PCT:.0f}%, "
-                    f"力控={REAL_GRASP_FORCE_PCT:.0f}%) ...",
+                    f"  [Cup {idx}/{num_cups} - {step_tag}] Close the gripper "
+                    f"(target gap={grasp_gap_mm:.1f} mm, speed={REAL_GRASP_SPEED_PCT:.0f}%, "
+                    f"force={REAL_GRASP_FORCE_PCT:.0f}%) ...",
                     flush=True,
                 )
                 robot.set_gripper_gap(
@@ -846,12 +803,13 @@ def run_sim2real_pipeline(
                     force_percent=REAL_GRASP_FORCE_PCT,
                 )
                 time.sleep(0.35)
-                meas_gap = _read_real_gripper_gap_mm(robot)
+                meas_gap = read_real_gripper_gap_mm(robot)
                 measured_grasp_gaps_mm.append(float(meas_gap))
                 if meas_gap < MIN_VALID_GRASP_GAP_MM:
                     print(
-                        f"  [闭环拦截] 纸杯 #{idx} 实测夹持开度过小 ({meas_gap:.1f} mm < "
-                        f"{MIN_VALID_GRASP_GAP_MM:.1f} mm，疑似空抓)，立即松开夹爪并退回初始位姿！",
+                        f"  [Abort] Cup #{idx} measured grasp gap too small ({meas_gap:.1f} mm < "
+                        f"{MIN_VALID_GRASP_GAP_MM:.1f} mm, likely an empty grasp); "
+                        "opening the gripper and returning to the observation pose",
                         flush=True,
                     )
                     robot.set_gripper_gap(
@@ -860,7 +818,7 @@ def run_sim2real_pipeline(
                         force_percent=50.0,
                     )
                     time.sleep(0.25)
-                    _stream_waypoints_on_real(
+                    stream_waypoints_on_real(
                         robot,
                         [cycle.approach_waypoints[0], q_obs],
                         soft_landing=True,
@@ -879,22 +837,23 @@ def run_sim2real_pipeline(
                         success=False,
                         completed=False,
                     )
-                    _write_json_report(report_path, result_payload)
+                    write_json_report(report_path, result_payload)
                     return result_payload
 
                 place_tag = "5/5" if use_closed_loop_cam else "3/4"
                 print(
-                    f"  [杯 {idx}/{num_cups} - {place_tag}] 连续抬起纸杯 #{idx}、空中翻转 90° 并{action_desc} ...",
+                    f"  [Cup {idx}/{num_cups} - {place_tag}] Lift cup #{idx}, flip it 90 deg, "
+                    f"and {action_desc} ...",
                     flush=True,
                 )
-                _stream_waypoints_on_real(
+                stream_waypoints_on_real(
                     robot,
                     cycle.lift_flip_place_waypoints,
                     soft_landing=True,
                 )
 
                 print(
-                    f"  [杯 {idx}/{num_cups} - 释放] 平顺张开 Gripper G2 释放纸杯 #{idx} ...",
+                    f"  [Cup {idx}/{num_cups} - release] Open the gripper to release cup #{idx} ...",
                     flush=True,
                 )
                 robot.set_gripper_gap(
@@ -918,11 +877,11 @@ def run_sim2real_pipeline(
                             q_cam_hover_next,
                         ]
                         print(
-                            f"  [杯 {idx}->{idx + 1}/{num_cups}] 安全退刀并连续移动相机至纸杯 #{idx + 1} "
-                            f"正上方观测位 (z_cam={CAM_HOVER_Z_M * 1000:.0f} mm) ...",
+                            f"  [Cup {idx}->{idx + 1}/{num_cups}] Retreat and move the camera above "
+                            f"cup #{idx + 1} (z_cam={CAM_HOVER_Z_M * 1000:.0f} mm) ...",
                             flush=True,
                         )
-                        _stream_waypoints_on_real(
+                        stream_waypoints_on_real(
                             robot,
                             merged_retreat_hover,
                             soft_landing=True,
@@ -933,20 +892,21 @@ def run_sim2real_pipeline(
                             next_cycle.approach_waypoints
                         )
                         print(
-                            f"  [杯 {idx}->{idx + 1}/{num_cups}] 安全退刀并连续过渡至纸杯 #{idx + 1} 抓取位姿 ...",
+                            f"  [Cup {idx}->{idx + 1}/{num_cups}] Retreat and continue to the "
+                            f"cup #{idx + 1} grasp pose ...",
                             flush=True,
                         )
-                        _stream_waypoints_on_real(
+                        stream_waypoints_on_real(
                             robot,
                             merged_retreat_approach,
                             soft_landing=True,
                         )
                 else:
                     print(
-                        f"  [杯 {idx}/{num_cups} - 完成] 沿夹爪轴向安全退刀并连续回到观测位姿 ...",
+                        f"  [Cup {idx}/{num_cups} - done] Retreat and return to the observation pose ...",
                         flush=True,
                     )
-                    _stream_waypoints_on_real(
+                    stream_waypoints_on_real(
                         robot,
                         cycle.retreat_waypoints,
                         soft_landing=False,
@@ -954,14 +914,14 @@ def run_sim2real_pipeline(
 
             q_final = robot.get_joint_positions()
             final_err_rad = float(np.max(np.abs(q_final - q_obs)))
-            t_base_flange_after = np.eye(4, dtype=np.float64)
-            t_base_flange_after[:3, :3] = robot.data.xmat[link6_id].reshape(3, 3)
-            t_base_flange_after[:3, 3] = robot.data.xpos[link6_id]
+            t_base_flange_after = flange_pose(robot.model, robot.data)
 
             post_ok = True
             if post_verify:
-                print("[闭环确认] 正在从 Orbbec Gemini 305 拍照确认多纸杯同心堆叠状态 ...", flush=True)
-                after_bgr, after_depth, _ = capture_rgbd_frame(stream=cam_stream)
+                print("[Verify] Capturing RGB-D to verify the cup stack ...", flush=True)
+                after_bgr, after_depth, _ = capture_rgbd_frame(
+                    serial=camera_serial, stream=cam_stream
+                )
                 post_check, after_debug = verify_stacked_cups(
                     after_bgr,
                     after_depth,
@@ -976,14 +936,15 @@ def run_sim2real_pipeline(
                     after_file = save_post_stack_overlay(
                         after_bgr, post_check, after_debug, save_after_vis_path
                     )
-                    print(f"[闭环确认] 已保存堆叠后验证图像: {after_file}", flush=True)
+                    print(f"[Verify] Saved verification overlay: {after_file}", flush=True)
                 result_payload["post_stack_verification"] = post_check.as_dict()
                 post_ok = bool(post_check.ok)
-                status_tag = "通过" if post_ok else f"未通过 ({post_check.reason})"
+                status_tag = "PASS" if post_ok else f"FAIL ({post_check.reason})"
                 print(
-                    f"[闭环确认] 视觉复核{status_tag}: 实测位置=({post_check.measured_xy_m[0]:.3f}, "
-                    f"{post_check.measured_xy_m[1]:.3f}) m, 水平偏差={post_check.xy_error_mm:.1f} mm, "
-                    f"顶层杯口高度={post_check.rim_height_mm:.1f} mm, 纸杯像素={post_check.roi_cup_pixels}",
+                    f"[Verify] {status_tag}: measured=({post_check.measured_xy_m[0]:.3f}, "
+                    f"{post_check.measured_xy_m[1]:.3f}) m, XY error={post_check.xy_error_mm:.1f} mm, "
+                    f"top rim height={post_check.rim_height_mm:.1f} mm, "
+                    f"cup pixels={post_check.roi_cup_pixels}",
                     flush=True,
                 )
 
@@ -997,27 +958,19 @@ def run_sim2real_pipeline(
                 ok=overall_ok,
                 success=overall_ok,
             )
-            _write_json_report(report_path, result_payload)
+            write_json_report(report_path, result_payload)
             if not post_ok:
                 raise SafetyGateError(
-                    f"堆叠后相机闭环确认未通过: {result_payload['post_stack_verification']['reason']}"
+                    "Post-stack verification failed: "
+                    f"{result_payload['post_stack_verification']['reason']}"
                 )
             gaps_str = ", ".join(f"{g:.1f} mm" for g in measured_grasp_gaps_mm)
             print(
-                f"[Real] 真机 {num_cups} 杯堆叠与视觉闭环确认完成: 实测夹持开度=[{gaps_str}], "
-                f"回位关节误差={final_err_rad * 1000:.2f} mrad",
+                f"[Real] Stacked {num_cups} cups: measured grasp gaps=[{gaps_str}], "
+                f"return joint error={final_err_rad * 1000:.2f} mrad",
                 flush=True,
             )
             return result_payload
         finally:
             if cam_stream is not None:
                 cam_stream.close()
-
-
-def _write_json_report(report_path: str | Path | None, payload: dict[str, Any]) -> None:
-    if not report_path:
-        return
-    path = Path(report_path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-

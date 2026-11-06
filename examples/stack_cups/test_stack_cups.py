@@ -1,32 +1,24 @@
+# SPDX-License-Identifier: BSD-3-Clause
+# Copyright (c) 2026, UFACTORY Inc.
 """Physical acceptance and failure-path tests for multi-cup pick-and-stack in MuJoCo."""
 
 from __future__ import annotations
 
 import json
-import sys
-from pathlib import Path
 
 import mujoco
 import numpy as np
 import pytest
 import yaml
+from ufactory_mujoco.calibration import load_kinematics_calibration
+from ufactory_mujoco.grippers import bodies_in_contact
+from ufactory_mujoco.safety import SafetyGateError, enforce_single_cycle
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-import stack_cups as demo
-
-
-@pytest.fixture(autouse=True)
-def _isolate_local_modules() -> None:
-    local_dir = Path(__file__).resolve().parent
-    local_str = str(local_dir)
-    if sys.path[0] != local_str:
-        if local_str in sys.path:
-            sys.path.remove(local_str)
-        sys.path.insert(0, local_str)
-    for mod_name in ("perception", "sim2real"):
-        mod = sys.modules.get(mod_name)
-        if mod is not None and Path(getattr(mod, "__file__", "")).resolve().parent != local_dir:
-            sys.modules.pop(mod_name, None)
+from common.motion import interpolate_waypoint_chain
+from common.paths import SAMPLE_CALIBRATION_YAML, SAMPLE_HANDEYE_YAML
+from common.sim2real import flange_pose
+from examples.stack_cups import perception, sim2real
+from examples.stack_cups import stack_cups as demo
 
 
 @pytest.fixture
@@ -51,10 +43,10 @@ def test_headless_two_cups_pick_and_stack(robot):
     assert result["max_contact_loss_s"] <= demo.MAX_CONTACT_LOSS_S
 
     assert demo._contact_between(robot, "table", "cup_1_bottom")
-    assert demo.bodies_in_contact(robot.model, robot.data, "paper_cup_1", "paper_cup_2")
+    assert bodies_in_contact(robot.model, robot.data, "paper_cup_1", "paper_cup_2")
     for cup in ("paper_cup_1", "paper_cup_2"):
-        assert not demo.bodies_in_contact(robot.model, robot.data, "left_finger", cup)
-        assert not demo.bodies_in_contact(robot.model, robot.data, "right_finger", cup)
+        assert not bodies_in_contact(robot.model, robot.data, "left_finger", cup)
+        assert not bodies_in_contact(robot.model, robot.data, "right_finger", cup)
     assert all(int(kind) != int(mujoco.mjtEq.mjEQ_WELD) for kind in robot.model.eq_type)
 
 
@@ -69,13 +61,13 @@ def test_headless_three_cups_pick_and_stack(robot):
     for step_mm in result["nested_steps_mm"]:
         assert 4.0 <= step_mm <= 35.0
     assert demo._contact_between(robot, "table", "cup_1_bottom")
-    assert demo.bodies_in_contact(robot.model, robot.data, "paper_cup_1", "paper_cup_2")
-    assert demo.bodies_in_contact(robot.model, robot.data, "paper_cup_2", "paper_cup_3")
+    assert bodies_in_contact(robot.model, robot.data, "paper_cup_1", "paper_cup_2")
+    assert bodies_in_contact(robot.model, robot.data, "paper_cup_2", "paper_cup_3")
 
 
 def test_cannot_lift_without_bilateral_contact(robot, monkeypatch):
     monkeypatch.setattr(robot, "bilateral_finger_contact", lambda _: False)
-    with pytest.raises(demo.DemoError, match="无双侧指垫接触"):
+    with pytest.raises(demo.TaskError, match="No bilateral finger contact"):
         demo.run_stack_cups(robot, num_cups=2)
     bottom, _ = demo._cup_pose(robot, "paper_cup_1")
     assert bottom[2] < 0.04
@@ -89,7 +81,7 @@ def test_lost_contact_during_lift_aborts(robot, monkeypatch):
         "bilateral_finger_contact",
         lambda name: actual_contact(name) if robot.grasp_monitor is None else False,
     )
-    with pytest.raises(demo.DemoError, match="夹持中滑脱：双侧接触中断"):
+    with pytest.raises(demo.TaskError, match="bilateral contact lost"):
         demo.run_stack_cups(robot, num_cups=2)
     assert robot.grasp_monitor.max_lost_s > demo.MAX_CONTACT_LOSS_S
 
@@ -105,7 +97,7 @@ def test_excess_relative_motion_aborts(robot, monkeypatch):
             monitor.axis,
         ),
     )
-    with pytest.raises(demo.DemoError, match="夹持中滑脱：相对位移"):
+    with pytest.raises(demo.TaskError, match="relative shift"):
         monitor.observe(robot)
 
 
@@ -123,7 +115,7 @@ def test_unseated_stack_fails_verification(robot):
     robot.data.qpos[adr2 + 3 : adr2 + 7] = [1.0, 0.0, 0.0, 0.0]
     mujoco.mj_forward(robot.model, robot.data)
 
-    with pytest.raises(demo.DemoError, match="堆叠检查失败"):
+    with pytest.raises(demo.TaskError, match="Stack check failed"):
         demo._verify_stack_rest(
             robot,
             ["paper_cup_1", "paper_cup_2"],
@@ -176,8 +168,6 @@ def test_config_and_cli_options(tmp_path, monkeypatch):
 
 
 def test_perception_manual_multi_cup_validation():
-    import perception
-
     estimates = perception.pose_estimates_from_manual(
         [0.54, -0.16, -140.0, 0.50, 0.06, -60.0],
         num_cups=2,
@@ -188,14 +178,14 @@ def test_perception_manual_multi_cup_validation():
     assert estimates[1].cup_bottom_xy_m == pytest.approx((0.50, 0.06))
 
     # Out of workspace bounds must fail
-    with pytest.raises(perception.PerceptionError, match="超出安全净空工作区"):
+    with pytest.raises(perception.PerceptionError, match="outside the workspace"):
         perception.pose_estimates_from_manual(
             [0.54, -0.16, 0.0, 0.45, 0.25, 0.0],
             num_cups=2,
         )
 
     # Overlapping cups must fail separation check
-    with pytest.raises(perception.PerceptionError, match="中心间距过近"):
+    with pytest.raises(perception.PerceptionError, match="is too close to cup"):
         perception.pose_estimates_from_manual(
             [0.45, -0.10, 0.0, 0.47, -0.09, 10.0],
             num_cups=2,
@@ -203,8 +193,6 @@ def test_perception_manual_multi_cup_validation():
 
 
 def test_perception_detects_multiple_sideways_cups_from_synthetic_rgbd(tmp_path):
-    import perception
-
     h, w = 800, 1280
     fx, fy, cx, cy = 612.5, 612.7, 633.2, 399.8
     k_mat = [[fx, 0.0, cx], [0.0, fy, cy], [0.0, 0.0, 1.0]]
@@ -290,10 +278,6 @@ def test_perception_detects_multiple_sideways_cups_from_synthetic_rgbd(tmp_path)
 
 
 def test_sim2real_target_selection_and_safety_gates():
-    import perception
-    import sim2real
-    from ufactory_mujoco.safety import SafetyGateError, enforce_single_cycle
-
     cups = perception.pose_estimates_from_manual(
         [0.568, -0.168, -142.2, 0.503, 0.081, -61.0],
         num_cups=2,
@@ -302,7 +286,7 @@ def test_sim2real_target_selection_and_safety_gates():
     assert np.allclose(chosen, [0.36, -0.06])
 
     # Explicit target too close to one of the cups must fail closed
-    with pytest.raises(SafetyGateError, match="距离过近"):
+    with pytest.raises(SafetyGateError, match="too close to a cup"):
         sim2real.select_safe_stack_target_xy(cups, requested_target_xy=(0.52, -0.18))
 
     # Multi-cycle hardware request must fail closed
@@ -311,8 +295,6 @@ def test_sim2real_target_selection_and_safety_gates():
 
 
 def test_verify_stacked_cups_closed_loop(tmp_path):
-    import perception
-
     h, w = 800, 1280
     fx, fy, cx, cy = 612.5, 612.7, 633.2, 399.8
     k_mat = [[fx, 0.0, cx], [0.0, fy, cy], [0.0, 0.0, 1.0]]
@@ -387,11 +369,7 @@ def test_verify_stacked_cups_closed_loop(tmp_path):
 
 
 def test_trajectory_smooth_deceleration_and_continuity():
-    import perception
-    import sim2real
-    from ufactory_mujoco.calibration import load_kinematics_calibration
-
-    calib = load_kinematics_calibration(sim2real.DEFAULT_CALIBRATION_YAML, robot="xarm6")
+    calib = load_kinematics_calibration(SAMPLE_CALIBRATION_YAML, robot="xarm6")
     cups = perception.pose_estimates_from_manual(
         [0.5682, -0.1669, -142.19, 0.5026, 0.0815, -61.32],
         num_cups=2,
@@ -402,6 +380,7 @@ def test_trajectory_smooth_deceleration_and_continuity():
         np.array([0.36, -0.06], dtype=np.float64),
         q_init=q_obs,
         calibration=calib,
+        handeye_yaml=SAMPLE_HANDEYE_YAML,
         headless=True,
     )
     assert report.ok, f"Digital twin preflight failed: {report.failures}"
@@ -420,9 +399,7 @@ def test_trajectory_smooth_deceleration_and_continuity():
     ]
 
     for name, wps, soft_land in phases:
-        seg = sim2real._interpolate_waypoint_chain(
-            q_cur, wps, dt=dt, soft_landing=soft_land
-        )
+        seg = interpolate_waypoint_chain(q_cur, wps, dt=dt, soft_landing=soft_land)
         qd = np.diff(seg, axis=0) / dt
         max_qd = np.max(np.abs(qd), axis=1)
         qdd = np.diff(qd, axis=0) / dt
@@ -445,9 +422,6 @@ def test_trajectory_smooth_deceleration_and_continuity():
 
 def test_detect_single_cup_near_present_and_missing(tmp_path):
     """Verify local look-down cup refinement when present/shifted and None when missing."""
-    import perception
-    import yaml
-
     h, w = 800, 1280
     fx, fy, cx, cy = 612.5, 612.7, 633.2, 399.8
     k_mat = [[fx, 0.0, cx], [0.0, fy, cy], [0.0, 0.0, 1.0]]
@@ -528,14 +502,8 @@ def test_detect_single_cup_near_present_and_missing(tmp_path):
 
 def test_solve_camera_lookdown_q_alignment():
     """Verify solve_camera_lookdown_q aligns the Eye-in-Hand camera optical center over target XY."""
-    import mujoco
-    import sim2real
-    import stack_cups as demo
-    from perception import load_handeye_calibration
-    from ufactory_mujoco.calibration import load_kinematics_calibration
-
-    calib = load_kinematics_calibration(sim2real.DEFAULT_CALIBRATION_YAML, robot="xarm6")
-    handeye = load_handeye_calibration()
+    calib = load_kinematics_calibration(SAMPLE_CALIBRATION_YAML, robot="xarm6")
+    handeye = perception.load_handeye_calibration(SAMPLE_HANDEYE_YAML)
     x_fc = np.asarray(handeye["extrinsics"]["X_flange_cam"], dtype=np.float64)
     q_seed = np.array([0.0, -0.55, -0.35, 0.0, 0.90, 0.0], dtype=np.float64)
 
@@ -545,16 +513,10 @@ def test_solve_camera_lookdown_q_alignment():
         z_cam_m=0.280,
         q_seed=q_seed,
         calibration=calib,
+        handeye_yaml=SAMPLE_HANDEYE_YAML,
     )
     with demo.StackCupRobot(viewer=False, calibration=calib) as sim_robot:
         sim_robot.data.qpos[:6] = q_cam
         mujoco.mj_forward(sim_robot.model, sim_robot.data)
-        link6_id = mujoco.mj_name2id(sim_robot.model, mujoco.mjtObj.mjOBJ_BODY, "link6")
-        t_bf = np.eye(4, dtype=np.float64)
-        t_bf[:3, :3] = sim_robot.data.xmat[link6_id].reshape(3, 3)
-        t_bf[:3, 3] = sim_robot.data.xpos[link6_id]
-        t_bc = t_bf @ x_fc
+        t_bc = flange_pose(sim_robot.model, sim_robot.data) @ x_fc
         assert np.allclose(t_bc[:3, 3], [0.490, 0.075, 0.280], atol=0.002)
-
-
-

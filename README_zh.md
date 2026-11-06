@@ -2,152 +2,122 @@
 
 [English](README.md) | [中文](README_zh.md)
 
-基于 **MuJoCo** 与 **UFACTORY xArm 6** 机械臂、**Gripper G2** 四连杆平行夹爪及 **Orbbec Gemini 305**（Eye-in-Hand 眼在手上）RGB-D 相机的接触丰富操作（Contact-Rich Manipulation）与 **Sim-to-Real** 闭环控制示例集。
+基于 MuJoCo 的 **UFACTORY xArm 6 + Gripper G2** 操作示例。每个示例都可以在仿真中运行，也可以配合腕部 **Orbbec Gemini 305** 相机（眼在手上）在真机上执行。
 
-本仓库构建于 [`ufactory_mujoco`](https://github.com/DanielWang123321/ufactory_mujoco) 基础之上，展示了薄壁轻质物体柔顺抓取翻转、多物体同心套叠以及带触觉 Z 轴闭环自适应的 3D 螺旋螺纹旋紧等高精度操作任务。
+物体只通过仿真接触被移动（不使用 weld 等附着约束）。所有真机动作都先在加载本机运动学标定参数的 MuJoCo 数字孪生中预演。
 
----
+## 示例
 
-## 核心特性
+| 示例 | 任务 | 文档 |
+| :--- | :--- | :--- |
+| [`pick_cup`](examples/pick_cup) | 夹取侧卧纸杯，空中翻转后竖直放置。 | [EN](examples/pick_cup/README.md) / [中文](examples/pick_cup/README_zh.md) |
+| [`stack_cups`](examples/stack_cups) | 夹取 2–3 个纸杯并套叠成一摞。 | [EN](examples/stack_cups/README.md) / [中文](examples/stack_cups/README_zh.md) |
+| [`screw_nut`](examples/screw_nut) | 夹取六角法兰螺母并拧到固定在桌面的 M12 螺丝上。 | [EN](examples/screw_nut/README.md) / [中文](examples/screw_nut/README_zh.md) |
 
-- **高保真接触物理建模**：
-  - **中空一次性纸杯（`5.74 g`）**：采用 24 段倾角圆台薄壁碰撞几何（壁厚 `1 mm`）与三级接触优先级解耦设计（$\mu_{\text{cup-cup}} = 0.08 < \tan\alpha = 0.125$），实现上层纸杯释放后沿内壁自定心顺滑嵌套而不卡滞。
-  - **M12 螺旋螺丝与六角法兰螺母（`56.5 g` / `29.0 g`）**：螺杆具备 12 圈连续右旋 3D 胶囊体螺旋凸起（螺距 `2.40 mm`，共 `192` 段），配合螺母内孔 8 颗内螺旋啮合球齿，支持螺杆半途物理自锁与亮光金属（Chrome Steel）高光反射渲染。
-- **Eye-in-Hand 闭环视觉感知（`common/vision.py`）**：
-  - 支持 Orbbec Gemini 305 对齐 RGB-D 采集与基座坐标系点云反投影。
-  - **正上方二次精测（2-Stage Look-Down Refinement）**：通过 `solve_camera_lookdown_q`（`z_cam = 250 mm`）将腕部相机移动至目标正上方垂直俯视复测，消除斜视视差并拦截目标移位/缺失。
-  - **任务完成闭环确认**：真机作业完成后自动退回观测位二次拍照，对纸杯竖放倾角、叠杯同心度及螺母旋紧高度进行闭环验收。
-- **触觉 Z 轴闭环自适应与软着陆轨迹规划（`common/motion.py`）**：
-  - 提供单调软着陆进度曲线（`smooth_progress_profile`）与曲率限速多路点平滑插值（`interpolate_waypoint_chain`），确保起止零速与末端柔和减速。
-  - 实时读取 Gripper G2 夹爪开度反馈（`get_measured_gripper_gap`），自动识别空抓、误夹螺母底法兰（开度 `> 21.2 mm`）及真机轴向滞后，自主触发 Z 轴上抬重抓（`+3.5 mm`）与自适应补拧行程。
-- **三阶段 Sim-to-Real 安全门禁**：
-  1. `dry-run`：实机相机感知 + 加载单机运动学标定的 MuJoCo 数字孪生预演（零硬件运动）。
-  2. `sdk-sim`：xArm 控制器内部仿真演练（`mode=4, state=5`，物理机械臂不动）。
-  3. `real --confirm-real`：单周期真机闭环执行，受数字孪生碰撞净空（`>= 5 mm`）、腕部相机离桌净空（`>= 88–95 mm`）及预演窗口提前关闭熔断保护。
+所有示例支持相同的运行模式：
 
----
+| 模式 | 运行内容 | 机械臂是否运动 |
+| :--- | :--- | :--- |
+| `sim`（默认） | 仅 MuJoCo 仿真 | 否 |
+| `dry-run` | 相机识别 + 数字孪生预演 | 否 |
+| `sdk-sim` | 预演得到的关节轨迹在 xArm 控制器仿真模式中回放 | 否 |
+| `real` | 真机执行完整任务，必须加 `--confirm-real` | 是 |
 
-## 示例导航
+## 环境要求
 
-| 编号 | 示例任务 | 目录 | 核心能力概览 | 说明文档 |
-| :--- | :--- | :--- | :--- | :--- |
-| **01** | **一次性纸杯夹取与翻转竖放** | [`examples/pick_cup`](examples/pick_cup) | 侧卧圆台纸杯 6D 位姿感知、`15%` 柔顺力控夹持、空中 `90°` 无碰撞翻转、竖直放置与视觉闭环确认 | [中文](examples/pick_cup/README_zh.md) \| [English](examples/pick_cup/README.md) |
-| **02** | **多个纸杯夹取与同心套杯堆叠** | [`examples/stack_cups`](examples/stack_cups) | 多纸杯连通域分割、从右至左抓取排序、杯口内嵌 `4 mm` 防滑出释放、2/3 杯同心套叠与静置验收 | [中文](examples/stack_cups/README_zh.md) \| [English](examples/stack_cups/README.md) |
-| **03** | **M12 螺丝螺母多把倒手旋紧** | [`examples/screw_nut`](examples/screw_nut) | 12 圈 3D 螺旋啮合与半途自锁、`J6 ∈ [-360°, +360°]` 多把倒手（Ratchet）、正上方二次精测、触觉 Z 轴闭环自适应 | [中文](examples/screw_nut/README_zh.md) \| [English](examples/screw_nut/README.md) |
+- Linux，Python 3.12–3.14
+- 仿真：无需硬件
+- 硬件模式：xArm 6 + Gripper G2，Orbbec Gemini 305 安装在夹爪上，并完成[硬件配置](#硬件配置)
 
----
+## 安装
 
-## 环境安装与工作区布局
-
-### 1. 同级目录克隆仓库
-
-本仓库通过相对路径引用同级目录 [`ufactory_mujoco`](https://github.com/DanielWang123321/ufactory_mujoco) 中的机械臂模型及核心运动学/安全门禁库：
+本仓库使用 [`ufactory_mujoco`](https://github.com/DanielWang123321/ufactory_mujoco) 中的机器人模型、逆解、碰撞检测和安全门。将两个仓库克隆到同一目录：
 
 ```bash
-mkdir -p ~/workspace && cd ~/workspace
-git clone --depth 1 https://github.com/DanielWang123321/ufactory_mujoco.git
+mkdir workspace && cd workspace
+git clone https://github.com/DanielWang123321/ufactory_mujoco.git
 git clone https://github.com/DanielWang123321/uf_mujoco_examples.git
+
+cd uf_mujoco_examples
+pip install -e ".[dev]"          # 仿真 + 测试
+pip install -e ".[dev,real]"     # + 硬件模式所需的 xArm SDK 与 Orbbec SDK
 ```
 
-标准工作区目录结构如下：
+`ufactory_mujoco` 无需安装：场景文件按相对路径引用其模型，`common/paths.py` 会将其加入 `sys.path`。
 
-```text
-workspace/
-├── ufactory_mujoco/          # UFACTORY 机器人核心 MuJoCo 模型、IK、轨迹规划与安全接口库
-├── uf_mujoco_examples/       # 本仓库（接触丰富操作仿真与 Sim-to-Real 闭环控制示例集）
-└── camera_tool/              # （可选，仅真机相机模式使用）Eye-in-Hand 手眼标定结果与 Orbbec 采集工具
-```
+## 使用
 
-### 2. 安装 Python 依赖
-
-支持 **Python 3.12、3.13、3.14**（推荐 Ubuntu 22.04 / 24.04）：
+在仓库根目录运行：
 
 ```bash
-cd ~/workspace/uf_mujoco_examples
+python -m examples.pick_cup                      # 打开 MuJoCo 窗口
+python -m examples.pick_cup --headless           # 无窗口
+python -m examples.pick_cup --help               # 全部参数
 
-# 以可编辑模式安装 ufactory_mujoco 核心包与本仓库依赖
-pip install -e ../ufactory_mujoco
-pip install -e ".[dev]"
+# 真机按以下顺序执行：
+python -m examples.pick_cup --mode dry-run
+python -m examples.pick_cup --mode sdk-sim
+python -m examples.pick_cup --mode real --confirm-real
 ```
 
----
+参数优先级：命令行 > `examples/<task>/config.yaml` > 代码默认值。`--report <file>.json` 保存运行报告。
 
-## 快速上手
+## 硬件配置
 
-所有示例均支持通过模块入口（`python -m examples.<task>.run`）或脚本路径（`python examples/<task>/<task>.py`）启动。
+1. **标定文件**，放在 [`calibration/`](calibration/README_zh.md)：
+   - `xarm6_kinematics.yaml`：用 `ufactory_mujoco/scripts/gen_kinematics_params.py` 从 xArm 控制器读取的运动学标定；
+   - `eye_in_hand.yaml`：相机内参及相机在法兰坐标系下的位姿（格式见 [`eye_in_hand.example.yaml`](calibration/eye_in_hand.example.yaml)）。
+2. **机械臂 IP**：`config.yaml` 中的 `robot.ip` 或 `--ip`（默认 `192.168.1.60`）。
+3. **相机**：Gemini 305 接 USB 3 接口。若无法识别，安装 `pyorbbecsdk2` 自带的 udev 规则：
+   ```bash
+   sudo bash "$(python -c 'import pyorbbecsdk, os; print(os.path.dirname(pyorbbecsdk.__file__))')/shared/install_udev_rules.sh"
+   ```
+   连接多台相机时，在 `config.yaml` 中设置 `camera.serial` 或使用 `--camera-serial`。
+4. **场景与初始悬停位**：运行前将机械臂置于初始悬停 TCP 位姿 `[300, 0, 300, 180, 0, 0]`（`[x_mm, y_mm, z_mm, roll_deg, pitch_deg, yaw_deg]`）以俯视工作区，每次任务结束后会自动退回该起始位姿。感知算法针对绿色桌垫上的白色纸杯和金属零件调试，工作区为 X ∈ [0.20, 0.60] m、Y ∈ [−0.30, 0.22] m（机械臂基座坐标系）。
 
-### 1. 纯 MuJoCo 仿真模式（`--mode sim`）
+> [!CAUTION]
+> `real` 模式会驱动机械臂运动。请确保急停按钮触手可及，先运行 `dry-run` 和 `sdk-sim`，并确认工作区无障碍。`--confirm-real` 只授权执行一个周期。
 
-```bash
-# 示例 01：夹取侧卧一次性纸杯，空中翻转 90° 并竖直放置
-python -m examples.pick_cup.run --mode sim
-
-# 示例 02：多个一次性纸杯连续夹取与同心套叠（支持 2 杯或 3 杯）
-python -m examples.stack_cups.run --mode sim --num-cups 2
-python -m examples.stack_cups.run --mode sim --num-cups 3 --headless
-
-# 示例 03：夹取六角法兰螺母并多把倒手旋紧至桌面 M12 螺丝（默认 10 圈）
-python -m examples.screw_nut.run --mode sim
-python -m examples.screw_nut.run --mode sim --headless --thread-turns 3.0
-```
-
-> 传入 `--headless` 可在后台无头运行物理仿真，传入 `--report build/<task>/sim_report.json` 可输出结构化评测报告。
-
-### 2. Sim-to-Real 三阶段安全执行
-
-连接真机前，可在 `examples/<task>/config.yaml` 中配置 `robot.ip`、`robot.calibration` 和 `camera.handeye`（或通过命令行参数覆盖）：
-
-```bash
-# 阶段一 (dry-run)：Gemini 305 实机感知 + MuJoCo 数字孪生可视化预演（零硬件运动）
-python -m examples.screw_nut.run --mode dry-run
-
-# 阶段二 (sdk-sim)：xArm 控制器内部仿真演练（mode=4, state=5，物理机械臂不动）
-python -m examples.screw_nut.run --mode sdk-sim
-
-# 阶段三 (real)：完整闭环真机执行（必须显式传入 --confirm-real 授权标志）
-python -m examples.screw_nut.run --mode real --confirm-real
-```
-
----
-
-## 项目目录结构
+## 目录结构
 
 ```text
 uf_mujoco_examples/
-├── assets/
-│   ├── cup/                  # 一次性纸杯参数化生成脚本、视觉/碰撞网格与独立 MJCF
-│   ├── gripper_g2/           # 双面平滑法线 Gripper G2 高精度视觉 OBJ 与碰撞 STL 网格
-│   └── screw_nut/            # M12 螺旋螺丝与六角螺母生成脚本、亮光金属贴图及资产单元测试
-├── common/
-│   ├── motion.py             # 软着陆进度曲线、曲率限速轨迹平滑插值与真机流式下发工具
-│   └── vision.py             # Orbbec Gemini 305 采集流、手眼坐标变换与正上方俯视 IK 求解
-├── examples/
-│   ├── pick_cup/             # 01: 单个纸杯夹取、空中翻转与竖放（仿真 + Sim-to-Real）
-│   ├── stack_cups/           # 02: 多个纸杯连续夹取与同心套杯堆叠（仿真 + Sim-to-Real）
-│   └── screw_nut/            # 03: M12 螺丝螺母旋紧与触觉 Z 轴闭环自适应控制
-├── LICENSE                   # MIT 开源许可证
-├── NOTICE                    # 第三方资产与上游开源协议声明
-├── pyproject.toml            # Python 包配置、依赖声明及 pytest / ruff 规则
-└── requirements.txt          # 核心运行时依赖清单
+├── common/                 # 公共代码（不含具体任务逻辑）
+│   ├── paths.py            # 仓库路径，默认 IP 与标定文件
+│   ├── cli.py              # 公共命令行参数与 config.yaml 读取
+│   ├── sim.py              # TaskSimRobot 基类、接触判断
+│   ├── geometry.py         # 四元数工具
+│   ├── motion.py           # 关节轨迹平滑、软着陆、真机流式下发
+│   ├── camera.py           # Orbbec RGB-D 采集
+│   ├── vision.py           # 手眼标定、投影、相机俯视逆解
+│   ├── sim2real.py         # 碰撞检测器、配置哈希、JSON 报告
+│   └── objects/            # 多个示例共用的物体模型（纸杯）
+├── examples/<task>/
+│   ├── __main__.py         # python -m examples.<task>
+│   ├── <task>.py           # 仿真任务 + 命令行入口
+│   ├── perception.py       # 相机识别与任务后视觉确认
+│   ├── sim2real.py         # 数字孪生预演、sdk-sim、真机执行
+│   ├── scene.xml, config.yaml, assets/（软链接）
+│   └── test_<task>.py
+├── assets/                 # 网格与生成脚本（纸杯、螺丝螺母、Gripper G2）
+└── calibration/            # 各机器的标定文件（不纳入 git）
 ```
 
----
+### 新增示例
 
-## 测试与代码规范检查
+1. 新建 `examples/<task>/`，包含上述文件（可复制 `pick_cup` 作为模板）。
+2. 继承 `common.sim.TaskSimRobot` 实现场景机器人；通过 `active_waypoint_sink` 记录关节路点，以便在真机上回放同一动作。
+3. 使用 `common.cli.build_parser` / `resolve_run_options` / `run_cli` 构建命令行。
+4. 被多个示例使用的代码放入 `common/`，示例之间不互相引用。
+5. 添加 `test_<task>.py`，`pytest` 会自动发现。
 
-在仓库根目录下运行全量单元测试（覆盖 3D 资产几何、接触稳定性、多杯同心堆叠、螺旋螺纹自锁、触觉 Z 轴闭环自适应及 Sim-to-Real 安全门禁）与代码静态检查：
+## 测试
 
 ```bash
-# 运行全部单元测试与物理仿真回归测试
-pytest -v
-
-# 运行 Ruff 代码规范检查
-ruff check assets/ common/ examples/
+pytest              # 仿真与合成图像测试，无需硬件
+ruff check . && ruff format --check .
 ```
 
----
+## 许可
 
-## 开源许可
-
-本仓库源码与参数化资产生成工具遵循 [MIT License](LICENSE) 开源协议；衍生机器人与夹爪网格资产遵循 [NOTICE](NOTICE) 中列出的上游开源协议。
-
+[BSD 3-Clause](LICENSE)。第三方资源与上游许可：[NOTICE](NOTICE)。

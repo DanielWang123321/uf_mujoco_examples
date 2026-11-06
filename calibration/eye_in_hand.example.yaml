@@ -1,0 +1,20 @@
+# Eye-in-Hand calibration example (Orbbec Gemini 305 on an xArm 6 + Gripper G2).
+# Copy to eye_in_hand.yaml and replace the values with the result of your own calibration.
+# Units: meters. Only the keys below are read by the examples.
+camera:
+  width: 1280
+  height: 800
+  # Color camera intrinsics (pixels).
+  K:
+    - [612.5175, 0.0, 633.1997]
+    - [0.0, 612.6939, 399.7572]
+    - [0.0, 0.0, 1.0]
+  # OpenCV distortion coefficients (k1, k2, p1, p2, k3[, k4, k5, k6]).
+  distortion: [-1.096584, 0.573371, -0.000109, -0.000598, -0.086366, -1.077780, 0.547999, -0.076572]
+extrinsics:
+  # Camera pose in the flange (link6) frame, 4x4 homogeneous transform.
+  X_flange_cam:
+    - [-0.013986, -0.999893, 0.004288, 0.065366]
+    - [0.999898, -0.013973, 0.003010, -0.007317]
+    - [-0.002950, 0.004330, 0.999986, 0.020660]
+    - [0.0, 0.0, 0.0, 1.0]

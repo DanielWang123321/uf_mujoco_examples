@@ -12,6 +12,8 @@ reports/
 logs/
 *.log
 MUJOCO_LOG.TXT
+# Orbbec SDK runtime log
+Log/
 mjmodel.xml
 *.npy
 *.npz
@@ -21,6 +23,12 @@ mjmodel.xml
 !assets/**/*.png
 !examples/**/assets/*.png
 !docs/**/*.png
+
+# Per-robot calibration files (keep only the docs and the example)
+calibration/*
+!calibration/README.md
+!calibration/README_zh.md
+!calibration/*.example.yaml
 
 # Personal & AI agent development markdown files (local only, never tracked)
 AGENTS.md

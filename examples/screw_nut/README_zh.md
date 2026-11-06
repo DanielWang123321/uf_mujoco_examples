@@ -1,81 +1,63 @@
-# 03 — xArm 6 机械臂拧螺母（螺丝胶水固定于桌面）仿真与闭环控制示例
+# screw_nut — 将六角法兰螺母拧到固定螺丝上
 
 [English](README.md) | [中文](README_zh.md)
 
-基于 MuJoCo 与 UFACTORY xArm 6 + Gripper G2 + Orbbec Gemini 305（Eye-in-Hand）的拧螺母仿真及 Sim-to-Real 闭环控制示例：桌面已用胶水垂直固定一枚倒置的 M12 螺丝（质量 `56.5 g`，总长 `45.0 mm`，下部圆头 `Ø20.0 × 14.0 mm`，上部螺纹杆 `Ø12.0 × 31.0 mm`，含 **12 圈真实 3D 螺旋碰撞凸起**，螺距 `2.40 mm`），机械臂从桌面夹起一枚自由静置的六角法兰螺母（质量 `29.0 g`，底法兰 `Ø29.0 × 3.8 mm`，上部六角体 `Ø20.0 × 10.7 mm`，总高 `14.5 mm`，中空内孔含 **8 颗内螺旋啮合球齿**），同心套入螺丝顶端导引段并执行右旋螺纹**多把倒手（Ratchet）顺时针螺旋旋紧**（默认旋转 `10.0 圈 = 3600°`，分 7 把执行），最后释放螺母平坐于 `z = 14.0 mm` 螺丝头肩部台阶面。
+M12 螺丝（56.5 g，长 45 mm，头部 Ø20 × 14 mm）竖直粘在桌面上。机械臂夹取六角法兰螺母（29 g，法兰 Ø29 × 3.8 mm，六角体 Ø20 mm，高 14.5 mm），放到螺丝顶端，分多次顺时针旋转把螺母拧到螺丝头部。
 
-本示例集成了公共模块 `common/`（`common.motion` 与 `common.vision`）的**停止软着陆加减速**、**抓取前正上方二次精测**以及**触觉 Z 轴闭环自适应**能力。
-
-## 配置文件 (`config.yaml`)
-
-默认配置位于 `examples/screw_nut/config.yaml`：
-
-```yaml
-mode: sim
-headless: false  # false: 默认弹出 MuJoCo 3D 可视化窗口；true: 无头模式后台运行
-
-robot:
-  ip: "192.168.1.60"
-  calibration: "../ufactory_mujoco/calibrations/xarm6_kinematics_L56A01.yaml"
-
-camera:
-  handeye: "../camera_tool/result/eye_in_hand.yaml"
-
-task:
-  nut_xy: [0.3538, -0.0114]    # 螺母初始桌面坐标 [x_m, y_m]
-  nut_yaw_deg: 0.0             # 螺母初始绕 Z 轴偏航角 (deg)
-  screw_xy: [0.3560, -0.1028]  # 胶水固定螺丝的桌面中心坐标 [x_m, y_m]
-  thread_turns: 10.0           # 螺母套入螺杆后的顺时针旋紧圈数 (默认 10.0 圈 = 3600°，分 7 把倒手旋紧至底部肩台)
-  post_verify: true            # 完成拧螺母后是否通过 Gemini 305 正上方拍照进行闭环确认
-  save_vis: "build/screw_nut/real_detection.png"
-  save_after_vis: "build/screw_nut/real_after_thread.png"
-  report: "build/screw_nut/sim_report.json"
-```
-
-## 运行命令
-
-在项目根目录下执行：
+## 运行
 
 ```bash
-# 1. 默认纯仿真运行（弹出 MuJoCo 3D 可视化窗口，7 把倒手旋紧 10.0 圈）
-python -m examples.screw_nut.run --mode sim
+python -m examples.screw_nut                                  # 仿真（带窗口）
+python -m examples.screw_nut --headless
+python -m examples.screw_nut --headless --nut-pose 0.33 0.05 25 --screw-xy 0.38 -0.08 --thread-turns 3
 
-# 2. 无头模式运行并输出 JSON 评估报告
-python -m examples.screw_nut.run --mode sim --headless \
-  --report build/screw_nut/sim_report.json
-
-# 3. 自定义螺母/螺丝位置与旋紧圈数（如 3.0 圈 = 1080°，2 把倒手旋紧后自锁于螺杆中部）
-python -m examples.screw_nut.run --mode sim --headless \
-  --nut-pose 0.33 0.05 25.0 \
-  --screw-xy 0.38 -0.08 \
-  --thread-turns 3.0 \
-  --report build/screw_nut/sim_custom.json
-
-# 4. Sim-to-Real 三阶段（dry-run / sdk-sim / real）
-python -m examples.screw_nut.run --mode dry-run
-python -m examples.screw_nut.run --mode sdk-sim
-python -m examples.screw_nut.run --mode real --confirm-real
+python -m examples.screw_nut --mode dry-run                   # 相机 + 数字孪生，机械臂不动
+python -m examples.screw_nut --mode sdk-sim                   # 控制器仿真，机械臂不动
+python -m examples.screw_nut --mode real --confirm-real       # 真机
 ```
 
-## 物理与闭环控制机制
+| 参数 | 含义 |
+| :--- | :--- |
+| `--nut-pose X Y YAW_DEG` | 螺母位置（m）和六角朝向。仿真默认值为 `config.yaml` 中的 `task.nut_xy` / `task.nut_yaw_deg`。 |
+| `--screw-xy X Y` | 螺丝位置（m）。仿真默认值为 `task.screw_xy`。硬件模式下同时给出 `--nut-pose` 和 `--screw-xy` 时不使用相机识别。 |
+| `--thread-turns N` | 螺母套上螺丝顶端后的顺时针圈数，`0 < N ≤ 12`（默认 10）。 |
 
-1. **12 圈真实 3D 螺旋螺纹啮合与中途自锁**：
-   - **螺杆物理碰撞**：由芯部圆柱（`r = 4.90 mm`）与 **12 圈右旋螺旋胶囊体（Capsule）凸起**（共 `192` 段，螺距 `p = 2.40 mm`，外径 `12.0 mm`）构成；
-   - **螺母内孔物理碰撞**：底部 `7.2 mm` 同轴导引裙边（确保套入螺杆顶端时零倾角同心对准）+ 上部 **8 颗内螺旋球形啮合齿**（齿尖半径 `5.40 mm`，嵌入螺杆螺旋槽）；
-   - 当夹爪在螺杆半途松开时，螺母依靠 3D 螺旋凸起物理自锁停留在当前螺纹高度（实测松爪下沉 `< 0.15 mm`）。
-2. **多把倒手（Ratchet）旋紧与 `J6` `[-360°, +360°]` 限位保护**：
-   - 将总旋紧圈数（如 `10.0 圈 = 3600°`）自动拆解为多个单把行程（前 6 把各 `1.5 圈 = 540° = 3 × 180°`，第 7 把 `1.0 圈 = 360°`）；
-   - 每把顺时针旋紧同步下降 $\Delta z = p \cdot N_{\text{stroke}}$（`1.5 圈` 下降 `3.60 mm`）后，张开夹爪至 `50.0 mm`（螺母自锁停留于螺纹上），`J6` 逆时针回转倒手至起始角（`-346°`）并跟随螺母当前高度重新夹持上层六角体，全程严格保持在 `J6 ∈ [-360°, +360°]` 限位内。
-3. **触觉 Z 轴闭环自适应（`MAX_HEX_FLAT_GAP_MM = 21.2 mm`）**：
-   - 夹爪夹持力严格保持 `25.0%` 不上调；
-   - 当螺母因入扣或螺纹摩擦出现周向打滑（实际下降量滞后于理论螺距下降量）时，机械臂若按开环高度重抓会撞到螺母底部 `Ø29 mm` 法兰或六角对角顶点（实测夹持开度 `> 21.2 mm`）；
-   - 控制器在每把重抓后实时检测夹爪开度：若 `meas_gap > 21.2 mm`，自动张开夹爪并沿 Z 轴向上回退 `+3.5 mm`（`z_backoff_m`）重新夹持上部 `Ø20 mm` 六角对边（`18.5–19.8 mm`），并在原定行程结束后自动追加最多 `3` 把自适应补拧行程直至螺母到底。
-4. **抓取前正上方二次精测与任务完成闭环确认（`common/vision.py` + `perception.py`）**：
-   - 通过 `solve_camera_lookdown_q`（`z_cam = 250 mm`）消除斜视视差，在抓取前复测螺母圆心与偏航角（`detect_nut_near`）、在套入前复测固定螺丝中心与高度（`detect_screw_near`），并在旋紧完成后闭环确认螺母同轴就位高度（`verify_threaded_nut`）。
+公共参数（`--mode`、`--headless`、`--ip`、`--calibration`、`--handeye`、`--camera-serial`、`--post-verify`、`--save-vis`、`--save-after-vis`、`--report`）及默认值见 [`config.yaml`](config.yaml)。
 
-## 单元测试
+## 原理
 
-```bash
-pytest assets/screw_nut/test_screw_nut.py examples/screw_nut/test_screw_nut_sim.py -v
-```
+**仿真**（`screw_nut.py`）
 
+1. TCP 距桌面 9 mm 夹持六角体（指尖高于法兰），实测开度须在 12–24.5 mm 之间。
+2. 抬起螺母，移到螺丝上方，下降套入螺丝顶端（螺母与螺丝偏差 ≤ 6 mm）。
+3. 拧紧：每一次旋转中 J6 顺时针转动，TCP 每圈下降一个螺距。总圈数按 J6 ∈ [−360°, +360°] 拆分：10 圈 = 6 × 1.5 + 1 × 1.0（共 7 次）。两次旋转之间夹爪张开到 50 mm，J6 反转回位后重新夹紧。
+4. 松开、撤离，并要求静置 1 s：螺母落在螺丝头上（z ≈ 14 mm），水平误差 ≤ 1.5 mm，倾斜 ≤ 5°。
+
+螺丝碰撞模型有 12 圈螺旋凸棱（螺距 2.4 mm），螺母内孔有 8 个内齿，松开后螺母停留在螺纹上不下滑。指垫使用高摩擦（4.0），螺母与螺丝之间使用低摩擦（0.10）。
+
+**Sim-to-Real**（`sim2real.py`、`perception.py`）
+
+1. 采集一帧 RGB-D，识别螺母和螺丝（相对绿色桌垫做前景分割 + 深度）。
+2. 在加载标定参数的数字孪生中运行任务。对 50 Hz 关节轨迹的每个采样点检查关节限位、碰撞、腕部相机距桌面 ≥ 88 mm、关节步长 ≤ 0.15 rad。
+3. `sdk-sim` 在控制器仿真模式中回放轨迹。`real` 模式：
+   - 相机分别移动到螺母和螺丝正上方 250 mm 处重新测量，并重新规划；
+   - 以 25 % 夹持力夹取；实测开度 < 12 mm（空抓）则中止；
+   - 每次 J6 反转前要求夹爪张开 ≥ 42 mm（避开法兰）；
+   - 每次重新夹紧后，若开度 > 21.2 mm，说明手指滑到了 Ø29 mm 法兰上：夹爪张开，TCP 上抬 3.5–5.0 mm 后重新夹紧（每次旋转最多 3 次，结束时最多追加 3 次旋转）；
+   - 每次旋转记录到 `build/screw_nut/real_execution.log`。
+4. 返回后在螺丝正上方拍照确认结果（螺母在螺丝上，水平误差 ≤ 15 mm，螺母顶面高度与预期相差 ≤ 9 mm，螺母原位置已空）。
+
+> [!NOTE]
+> 仿真螺距（2.4 mm）大于真实 M12 螺距。真机上由上述重新夹紧开度检查补偿两者差异。
+
+## 文件
+
+| 文件 | 内容 |
+| :--- | :--- |
+| `screw_nut.py` | `ScrewNutRobot`、`run_screw_nut`、命令行 |
+| `perception.py` | `detect_nut_and_screw_overview`、`detect_nut_near`、`detect_screw_near`、`verify_threaded_nut` |
+| `sim2real.py` | 数字孪生预演、sdk-sim、真机执行 |
+| `scene.xml` | xArm 6 + G2、桌面、螺丝、螺母 |
+| `test_screw_nut_sim.py` | `pytest examples/screw_nut` |
+
+物体网格和碰撞模型由 [`assets/screw_nut/generate_screw_nut.py`](../../assets/screw_nut/generate_screw_nut.py) 生成。

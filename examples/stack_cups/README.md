@@ -1,72 +1,55 @@
-# 02 — Multi-Cup Pick & Coaxial Nesting Stack (Simulation & Sim-to-Real)
+# stack_cups — pick several paper cups and nest them into one stack
 
 [English](README.md) | [中文](README_zh.md)
 
-MuJoCo simulation and closed-loop Sim-to-Real example for **UFACTORY xArm 6 + Gripper G2 + Orbbec Gemini 305 (Eye-in-Hand)**: sequentially picks up multiple sideways disposable paper cups (`5.74 g` mass, `53 mm` bottom diameter, `75 mm` top diameter, `88 mm` height, `1 mm` wall thickness), flips each cup `90°` in mid-air so the rim faces up, places the base cup upright at the target coordinates, and coaxially nests subsequent cups inside the lower cups.
+Two or three disposable paper cups (5.74 g, Ø53 mm bottom, Ø75 mm rim, 88 mm tall) lie on their sides. The robot picks each cup, flips it upright in the air, places the first cup at the target point, and nests each following cup into the previous one.
 
-## Configuration (`config.yaml`)
-
-Default configuration is located at `examples/stack_cups/config.yaml`:
-
-```yaml
-mode: sim
-headless: false  # false: open 3D MuJoCo viewer; true: run offscreen
-
-robot:
-  ip: "192.168.1.60"
-  calibration: "../ufactory_mujoco/calibrations/xarm6_kinematics_L56A01.yaml"
-
-camera:
-  handeye: "../camera_tool/result/eye_in_hand.yaml"
-
-task:
-  num_cups: 2              # Number of cups to pick and stack (supports 2 or 3, default 2)
-  target_xy: [0.30, 0.20]  # Target stack horizontal coordinates [x_m, y_m]
-  post_verify: true        # Automatically capture a post-stack RGB-D verification frame on real robot
-  save_vis: "build/stack_cups/real_detection.png"
-  save_after_vis: "build/stack_cups/real_after_stack.png"
-  report: "build/stack_cups/sim_report.json"
-```
-
-## Quick Start Commands
-
-Run from the repository root:
+## Run
 
 ```bash
-# 1. Pure MuJoCo simulation (default 2-cup coaxial stacking with 3D interactive viewer)
-python -m examples.stack_cups.run --mode sim
-python -m examples.stack_cups.run --mode sim --headless --num-cups 2 --report build/stack_cups/sim_2cups.json
-python -m examples.stack_cups.run --mode sim --headless --num-cups 3 --report build/stack_cups/sim_3cups.json
+python -m examples.stack_cups                                 # simulation with viewer
+python -m examples.stack_cups --headless --num-cups 3
+python -m examples.stack_cups --headless --cup-poses 0.47 -0.15 -60 0.50 0.08 30 --target-xy 0.36 -0.06
 
-# 2. Sim-to-Real Stage 1: Gemini 305 multi-cup perception + MuJoCo digital-twin preflight (zero hardware motion)
-python -m examples.stack_cups.run --mode dry-run --num-cups 2 --report build/stack_cups/dry_run.json
-
-# 3. Sim-to-Real Stage 2: xArm controller internal simulation (mode=4, state=5; physical arm stationary)
-python -m examples.stack_cups.run --mode sdk-sim --num-cups 2 --report build/stack_cups/sdk_sim.json
-
-# 4. Sim-to-Real Stage 3: Multi-cup perception -> digital-twin preflight -> physical stacking -> post-stack verification
-python -m examples.stack_cups.run --mode real --confirm-real --num-cups 2 --report build/stack_cups/real.json
-
-# Optional: Manually specify multiple sideways cup poses (X1 Y1 YAW1 X2 Y2 YAW2 ...)
-python -m examples.stack_cups.run --mode dry-run --num-cups 2 \
-  --cup-poses 0.568 -0.168 -142.2 0.503 0.081 -61.0 \
-  --target-xy 0.36 -0.06
+python -m examples.stack_cups --mode dry-run                  # camera + digital twin, no motion
+python -m examples.stack_cups --mode sdk-sim                  # controller simulation, no motion
+python -m examples.stack_cups --mode real --confirm-real      # hardware
 ```
 
-## Physics & Control Architecture
+| Option | Meaning |
+| :--- | :--- |
+| `--num-cups {2,3}` | Number of cups (default `task.num_cups` in `config.yaml`). |
+| `--target-xy X Y` | Stack position (m), default `task.target_xy`. In hardware modes, if no target is given, a free spot ≥ 110 mm away from all cups is chosen. |
+| `--cup-poses X1 Y1 YAW1 ...` | Cup bottom positions (m) and bottom→rim yaws. In hardware modes it replaces camera detection. |
 
-- **Eye-in-Hand Multi-Cup 6D Pose Estimation & Post-Stack Verification** (`examples/stack_cups/perception.py`):
-  - Segments multiple white paper cup clusters in the safe workspace (`x ∈ [0.20, 0.60] m, y ∈ [-0.26, 0.12] m`), estimates each cup's 2D PCA axis and bottom-to-top orientation, and sorts grasp order from right (`-Y`) to left (`+Y`).
-  - After physical stacking, captures a second RGB-D frame (`verify_stacked_cups`) to verify stack center alignment, top-rim height, and source area clearance.
-- **3-Tier Contact Priority Decoupling**:
-  - **Gripper G2 finger pads** (`priority=2, friction=4.0`): High tangential friction for slip-free grasping and `90°` flipping.
-  - **Tabletop** (`priority=2, friction=1.5`): Prevents sideways cups from rolling and anchors the base cup during nesting.
-  - **Cup walls** (`priority=1, friction=0.08`): Satisfies $\mu_{\text{cup-cup}} = 0.08 < \tan\alpha = 0.125$ (frustum half-cone angle $\alpha \approx 7.125^\circ$), allowing upper cups to self-center and slide smoothly into the lower cup upon release.
-- **Rim-Inset Anti-Slip Release**:
-  - For cup $k \ge 2$, the arm aligns coaxially `25 mm` above the lower cup's rim and descends until the upper cup's bottom reaches $z_{\text{bot}, k} = z_{\text{rim}, k-1} - 4\text{ mm}$ before opening the gripper. The `53 mm` cup base is enclosed `4 mm` inside the `73 mm` inner mouth while the gripper fingers remain `~22 mm` above the rim.
+Shared options (`--mode`, `--headless`, `--ip`, `--calibration`, `--handeye`, `--camera-serial`, `--post-verify`, `--save-vis`, `--save-after-vis`, `--report`) and their defaults are in [`config.yaml`](config.yaml).
 
-## Running Tests
+## How it works
 
-```bash
-pytest examples/stack_cups/test_stack_cups.py -v
-```
+**Simulation** (`stack_cups.py`)
+
+1. For each cup: grasp it sideways, lift, and flip the cup axis to vertical (same grasp as [`pick_cup`](../pick_cup)).
+2. Move the cup bottom 25 mm above the target (first cup) or above the rim of the previous cup, correcting with the live cup positions.
+3. First cup: lower until it touches the table. Following cups: lower until the bottom is 4 mm below the previous rim (the fingers stay ~22 mm above it), then release; the cup slides into the previous one.
+4. After the last cup, require 1 s of rest: stack XY error ≤ 30 mm, adjacent cups coaxial within 8 mm, tilt ≤ 10°.
+
+Cup-to-cup contacts use low friction (0.08 < tan 7.1°, the cone half-angle), so a released cup centers itself in the cup below. Finger pads use high friction (4.0).
+
+**Sim-to-Real** (`sim2real.py`, `perception.py`)
+
+1. Capture one RGB-D frame and detect all white sideways cups (axis by PCA, bottom/rim end by width and height); cups are picked from right (−Y) to left (+Y).
+2. Run all cycles in the calibrated digital twin. Every sample of the 50 Hz joint stream is checked for joint limits, collisions, wrist-camera height ≥ 95 mm above the table, and joint step ≤ 0.15 rad.
+3. `sdk-sim` replays the stream in the controller's simulation mode. `real`:
+   - before each grasp, moves the camera 280 mm directly above the cup, re-measures it, and replans the grasp; returns home if the cup is gone;
+   - aborts and returns home if the measured grasp gap is < 30 mm (empty grasp).
+4. After returning, a second frame verifies the stack (≥ 1200 cup pixels, XY error ≤ 45 mm, rim height ≥ 50 mm, initial cup positions empty).
+
+## Files
+
+| File | Content |
+| :--- | :--- |
+| `stack_cups.py` | `StackCupRobot`, `run_stack_cups`, CLI |
+| `perception.py` | `detect_sideways_cups`, `detect_single_cup_near`, `verify_stacked_cups`, overlays |
+| `sim2real.py` | digital-twin preflight, sdk-sim, real execution |
+| `scene.xml` | xArm 6 + G2, table, three paper cups |
+| `test_stack_cups.py` | `pytest examples/stack_cups` |

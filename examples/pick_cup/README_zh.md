@@ -1,67 +1,51 @@
-# 01 — xArm 6 一次性纸杯抓取与翻转竖放（仿真与 Sim-to-Real）
+# pick_cup — 纸杯夹取、翻转与竖放
 
 [English](README.md) | [中文](README_zh.md)
 
-基于 MuJoCo 与 UFACTORY xArm 6 + Gripper G2 + Orbbec Gemini 305（Eye-in-Hand）的一次性纸杯抓取与翻转竖放示例：从桌面夹起侧卧纸杯（质量 `5.74 g`，底径 `53 mm`，顶径 `75 mm`，高 `88 mm`），在空中翻转 `90°` 并竖直放置到目标位置，使杯底着桌、杯口朝上。
+一次性纸杯（5.74 g，底部 Ø53 mm，杯口 Ø75 mm，高 88 mm）侧卧在桌面上。机械臂夹取纸杯，空中翻转 90° 后竖直放到目标点。
 
-## 配置文件 (`config.yaml`)
-
-默认配置位于 `examples/pick_cup/config.yaml`，支持配置运行模式、MuJoCo 预演是否无头运行以及放置后闭环拍照确认：
-
-```yaml
-mode: sim
-headless: false  # false: 默认弹出 MuJoCo 3D 可视化窗口预演；true: 无头模式后台运行
-
-robot:
-  ip: "192.168.1.60"
-  calibration: "../ufactory_mujoco/calibrations/xarm6_kinematics_L56A01.yaml"
-
-camera:
-  handeye: "../camera_tool/result/eye_in_hand.yaml"
-
-task:
-  post_verify: true  # 真机完成竖放回到观测位后，自动通过 Gemini 305 拍照进行闭环确认
-  save_vis: "build/pick_cup/real_detection.png"
-  save_after_vis: "build/pick_cup/real_after_place.png"
-```
-
-## 运行模式
-
-在项目根目录下执行：
+## 运行
 
 ```bash
-# 1. 纯 MuJoCo 仿真模式（默认读取 config.yaml，弹出 3D 可视化窗口）
-python -m examples.pick_cup.run --mode sim
-python -m examples.pick_cup.run --mode sim --headless
+python -m examples.pick_cup                                   # 仿真（打开窗口）
+python -m examples.pick_cup --headless
+python -m examples.pick_cup --cup-pose 0.46 -0.07 140 --target-xy 0.38 -0.18
 
-# 2. Sim-to-Real 阶段一：实机感知 + MuJoCo 可视化数字孪生预演（零硬件运动）
-python -m examples.pick_cup.run --mode dry-run --report build/pick_cup/dry_run.json
-
-# 3. Sim-to-Real 阶段二：xArm 控制器内部仿真演练（mode=4, state=5，物理机械臂不动）
-python -m examples.pick_cup.run --mode sdk-sim --report build/pick_cup/sdk_sim.json
-
-# 4. Sim-to-Real 阶段三：Gemini 305 感知 -> MuJoCo 可视化预演 -> 真机执行 -> 拍照闭环确认
-python -m examples.pick_cup.run --mode real --confirm-real --report build/pick_cup/real.json
-
-# 可选：手动指定桌面纸杯位姿（绕过相机感知，X/Y 单位 m，YAW_DEG 为杯底指向杯口的平面角）
-python -m examples.pick_cup.run --mode dry-run --cup-pose 0.44 -0.05 135.0
+python -m examples.pick_cup --mode dry-run                    # 相机 + 数字孪生，不运动
+python -m examples.pick_cup --mode sdk-sim                    # 控制器仿真，不运动
+python -m examples.pick_cup --mode real --confirm-real        # 真机
 ```
 
-## 架构与控制说明
+| 参数 | 含义 |
+| :--- | :--- |
+| `--cup-pose X Y YAW_DEG` | 杯底位置（m）与杯底→杯口偏航角。硬件模式下替代相机检测。 |
+| `--target-xy X Y` | 竖放目标点（m）。仿真默认 `(0.30, 0.15)`；硬件默认 `(0.38, -0.18)`，与纸杯距离小于 110 mm 时改用 `(0.38, 0.04)`。 |
 
-- **纸杯资产**（`assets/cup/generate_paper_cup.py`）：生成 1:1 视觉网格（`paper_cup.obj`）与中空碰撞几何（底面圆柱 `0.001180 kg` + 24 段圆台倾角盒体 `24 × 0.000190 kg`，总质量 `0.00574 kg`）。
-- **Eye-in-Hand 感知与放置后闭环验证**（`examples/pick_cup/perception.py`）：
-  - 采集 Gemini 305 对齐 RGB-D 帧，并结合手眼标定 YAML 反投影至基座坐标系。
-  - 在安全工作空间范围（`x ∈ [0.20, 0.60] m, y ∈ [-0.26, 0.12] m`）内提取白色纸杯点云，基于 2D PCA 主轴与圆台两端正交宽度/离桌高度自动判别杯底（`53 mm`）与杯口（`75 mm`）朝向，计算距杯底 `40 mm` 抓取中心点。
-  - 真机放置完成后，自动在观测位二次采集 RGB-D 帧（`verify_upright_cup`），对目标区域内竖直纸杯的水平位置偏差、杯口高度与前景像素进行闭环确认，并输出标注图（`save_post_place_overlay`）。
-- **数字孪生可视化预演与安全门禁**（`examples/pick_cup/sim2real.py`）：
-  - 在任何实机或控制器轨迹下发前，先在加载实机运动学标定的 MuJoCo 数字孪生环境中执行完整物理预演。
-  - 全程校验：自碰撞与桌面碰撞最小间距 `>= 5 mm`、腕部相机离桌高度 `>= 95 mm`、关节步进 `<= 0.08 rad`、仿真竖放稳定无倾倒；若预演窗口被提前关闭则立即阻断真机执行。
-  - 真机 G2 夹爪采用柔顺力控闭合（目标开度 `55 mm`、速度 `20%`、力 `15%`），夹住纸杯腰部微弹性形变约 `52.5 mm` 而不捏瘪杯身。
+公共参数（`--mode`、`--headless`、`--ip`、`--calibration`、`--handeye`、`--camera-serial`、`--post-verify`、`--save-vis`、`--save-after-vis`、`--report`）及默认值见 [`config.yaml`](config.yaml)。
 
-## 测试
+## 流程
 
-```bash
-pytest examples/pick_cup/test_pick_cup.py -v
-```
+**仿真**（`pick_cup.py`）
 
+1. 夹爪竖直，在距杯底 40 mm 处夹持；先闭合到 53 mm，回退 1 mm，再以 20 Hz 力反馈保持约 2 N 接触力。
+2. 抬起，将杯轴翻转至竖直，搬运过程中按纸杯实时位置修正，下降至杯底接触桌面。
+3. 松开、撤离，并要求纸杯独立站立 1 s（倾角 ≤ 10°，落点误差 ≤ 30 mm，漂移 ≤ 2 mm）。
+
+夹持期间，若双侧指垫接触中断超过 0.10 s，或纸杯相对 TCP 位移超过 25 mm / 转角超过 25°，任务中止。
+
+**Sim-to-Real**（`sim2real.py`、`perception.py`）
+
+1. 读取关节状态并拍摄一帧 RGB-D。通过白色像素 + 高于桌面的深度分割纸杯，PCA 求杯轴，按两端宽度与高度区分杯底和杯口。
+2. 在加载标定的数字孪生中执行任务并记录关节路点。对生成的 50 Hz 轨迹逐点检查关节限位、碰撞、腕部相机离桌高度 ≥ 95 mm、相邻步关节变化 ≤ 0.15 rad。
+3. `sdk-sim` 在控制器仿真模式中回放轨迹；`real` 下发到真机（夹持开度 50–55 mm，速度 20 %，力 15 %）。
+4. 回到观测位后再拍一帧验证结果（纸杯像素 ≥ 1200，水平误差 ≤ 45 mm，杯口高度 ≥ 45 mm）。
+
+## 文件
+
+| 文件 | 内容 |
+| :--- | :--- |
+| `pick_cup.py` | `CupRobot`、`run_pick_cup`、命令行 |
+| `perception.py` | `detect_sideways_cup`、`verify_upright_cup`、可视化 |
+| `sim2real.py` | 数字孪生预演、sdk-sim、真机执行 |
+| `scene.xml` | xArm 6 + G2、桌面、纸杯 |
+| `test_pick_cup.py` | `pytest examples/pick_cup` |

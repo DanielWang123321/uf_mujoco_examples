@@ -1,19 +1,15 @@
-"""Shared trajectory smoothing, curvature-bounded speed profiling, and soft-landing deceleration."""
+# SPDX-License-Identifier: BSD-3-Clause
+# Copyright (c) 2026, UFACTORY Inc.
+"""Joint-space trajectory smoothing, soft-landing deceleration, and real-robot streaming."""
 
 from __future__ import annotations
 
-import sys
 import time
-from pathlib import Path
 from typing import Any
 
 import mujoco
 import numpy as np
 from scipy.ndimage import gaussian_filter1d
-
-REPO_ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(REPO_ROOT.parent / "ufactory_mujoco"))
-
 from ufactory_mujoco.ik import solve_ik_trajectory
 from ufactory_mujoco.safety import SafetyGateError
 
@@ -60,7 +56,6 @@ def smooth_step_durations(
     inv_v = 1.0 / v_prof
     dts = float(duration) * (inv_v / np.sum(inv_v))
     return np.maximum(dts, float(min_dt))
-
 
 
 def interpolate_waypoint_chain(
@@ -162,15 +157,11 @@ def interpolate_waypoint_chain(
     a_tan_dn = (0.30 if soft_landing else 0.55) * max_acc_rad_s2
 
     for i in range(n_grid - 1):
-        v_prof[i + 1] = min(
-            v_prof[i + 1], np.sqrt(v_prof[i] ** 2 + 2.0 * a_tan_up * ds_step)
-        )
+        v_prof[i + 1] = min(v_prof[i + 1], np.sqrt(v_prof[i] ** 2 + 2.0 * a_tan_up * ds_step))
     for i in range(n_grid - 1, 0, -1):
         rem_s = s_total - u_grid[i - 1]
         a_local = (0.18 * max_acc_rad_s2) if (soft_landing and rem_s < 0.12) else a_tan_dn
-        v_prof[i - 1] = min(
-            v_prof[i - 1], np.sqrt(v_prof[i] ** 2 + 2.0 * a_local * ds_step)
-        )
+        v_prof[i - 1] = min(v_prof[i - 1], np.sqrt(v_prof[i] ** 2 + 2.0 * a_local * ds_step))
 
     # 6. Time integration and C2 velocity smoothing with exact endpoint target preservation
     v_mid = np.maximum(0.5 * (v_prof[:-1] + v_prof[1:]), 1e-3)
@@ -236,7 +227,7 @@ def solve_cartesian_segment(
         q_start,
     )
     if not ok:
-        raise SafetyGateError(f"闭环笛卡尔轨迹逆解未收敛: pos={pos_goal}")
+        raise SafetyGateError(f"Cartesian segment IK did not converge: pos={pos_goal}")
     return [np.asarray(q[:6], dtype=np.float64).copy() for q in q_traj]
 
 

@@ -1,77 +1,63 @@
-# 03 — M12 Helical Screw-Nut Threading & Tactile Closed-Loop Control
+# screw_nut — thread a hex flange nut onto a fixed screw
 
 [English](README.md) | [中文](README_zh.md)
 
-MuJoCo simulation and closed-loop Sim-to-Real example for **UFACTORY xArm 6 + Gripper G2 + Orbbec Gemini 305 (Eye-in-Hand)**: an inverted M12 screw (`56.5 g` mass, `45.0 mm` total height, `Ø20.0 × 14.0 mm` lower head, `Ø12.0 × 31.0 mm` upper threaded shaft with **12 continuous 3D helical thread turns** at `2.40 mm` pitch) is glued upright to the tabletop. The robot picks up a free hex flange nut (`29.0 g` mass, `Ø29.0 × 3.8 mm` bottom flange, `Ø20.0 × 10.7 mm` upper hex body, `14.5 mm` total height, with **8 internal helical follower teeth**), aligns it coaxially onto the screw tip, and executes **multi-stroke clockwise ratcheting** (default `10.0 turns = 3600°` across 7 strokes) with **tactile Z-axis closed-loop adaptation**.
+An M12 screw (56.5 g, 45 mm long, Ø20 × 14 mm head) is glued upright on the table. The robot picks a hex flange nut (29 g, Ø29 × 3.8 mm flange, Ø20 mm hex body, 14.5 mm tall), places it on the screw tip, and threads it down to the screw head in several clockwise strokes.
 
-## Configuration (`config.yaml`)
-
-Default configuration is located at `examples/screw_nut/config.yaml`:
-
-```yaml
-mode: sim
-headless: false  # false: open 3D MuJoCo viewer; true: run offscreen
-
-robot:
-  ip: "192.168.1.60"
-  calibration: "../ufactory_mujoco/calibrations/xarm6_kinematics_L56A01.yaml"
-
-camera:
-  handeye: "../camera_tool/result/eye_in_hand.yaml"
-
-task:
-  nut_xy: [0.3538, -0.0114]    # Initial tabletop coordinates of the free nut [x_m, y_m]
-  nut_yaw_deg: 0.0             # Initial Z-axis yaw angle of the nut (deg)
-  screw_xy: [0.3560, -0.1028]  # Tabletop coordinates of the glued upright screw [x_m, y_m]
-  thread_turns: 10.0           # Clockwise threading turns (default 10.0 turns = 3600° across 7 strokes)
-  post_verify: true            # Perform overhead Gemini 305 visual verification after threading
-  save_vis: "build/screw_nut/real_detection.png"
-  save_after_vis: "build/screw_nut/real_after_thread.png"
-  report: "build/screw_nut/sim_report.json"
-```
-
-## Quick Start Commands
-
-Run from the repository root:
+## Run
 
 ```bash
-# 1. Default interactive simulation (opens 3D viewer, threads 10.0 turns across 7 ratchet strokes)
-python -m examples.screw_nut.run --mode sim
+python -m examples.screw_nut                                  # simulation with viewer
+python -m examples.screw_nut --headless
+python -m examples.screw_nut --headless --nut-pose 0.33 0.05 25 --screw-xy 0.38 -0.08 --thread-turns 3
 
-# 2. Headless simulation with JSON report output
-python -m examples.screw_nut.run --mode sim --headless --report build/screw_nut/sim_report.json
-
-# 3. Custom nut/screw poses and partial threading (e.g., 3.0 turns = 1080°, self-locking mid-shaft)
-python -m examples.screw_nut.run --mode sim --headless \
-  --nut-pose 0.33 0.05 25.0 \
-  --screw-xy 0.38 -0.08 \
-  --thread-turns 3.0 \
-  --report build/screw_nut/sim_custom.json
-
-# 4. Sim-to-Real 3-stage pipeline (dry-run / sdk-sim / real)
-python -m examples.screw_nut.run --mode dry-run
-python -m examples.screw_nut.run --mode sdk-sim
-python -m examples.screw_nut.run --mode real --confirm-real
+python -m examples.screw_nut --mode dry-run                   # camera + digital twin, no motion
+python -m examples.screw_nut --mode sdk-sim                   # controller simulation, no motion
+python -m examples.screw_nut --mode real --confirm-real       # hardware
 ```
 
-## Physics & Closed-Loop Control Architecture
+| Option | Meaning |
+| :--- | :--- |
+| `--nut-pose X Y YAW_DEG` | Nut position (m) and hex yaw. Sim default `task.nut_xy` / `task.nut_yaw_deg` in `config.yaml`. |
+| `--screw-xy X Y` | Screw position (m). Sim default `task.screw_xy`. In hardware modes, giving both `--nut-pose` and `--screw-xy` replaces camera detection. |
+| `--thread-turns N` | Clockwise turns after the nut is on the screw tip, `0 < N ≤ 12` (default 10). |
 
-1. **12-Turn 3D Helical Thread Collision & Mid-Shaft Self-Locking**:
-   - **Screw Shaft Collision**: Core cylinder (`r = 4.90 mm`) + **12 right-hand helical capsule turns** (`192` segments, `2.40 mm` pitch, `12.0 mm` outer diameter).
-   - **Nut Internal Bore Collision**: Bottom `7.2 mm` coaxial guide skirt + **8 internal helical sphere follower teeth** (`5.40 mm` tip radius) that mesh directly into the screw's helical groove.
-   - Releasing the gripper mid-shaft leaves the nut mechanically self-locked on the thread (`< 0.15 mm` settle drop).
-2. **Multi-Stroke Ratcheting within `J6 ∈ [-360°, +360°]` Limits**:
-   - Automatically decomposes total turns (e.g. `10.0 turns = 3600°`) into bounded strokes (first 6 strokes of `1.5 turns = 540°`, 7th stroke of `1.0 turn = 360°`).
-   - During each stroke, the arm rotates `J6` clockwise while descending synchronously by $\Delta z = p \cdot N_{\text{stroke}}$ (`3.60 mm` per `1.5` turns), opens the gripper to `50.0 mm`, unwinds `J6` counter-clockwise back to `-346°`, and re-grasps the upper hex body.
-3. **Tactile Z-Axis Closed-Loop Adaptation (`MAX_HEX_FLAT_GAP_MM = 21.2 mm`)**:
-   - Gripper grasping force is strictly capped at `25.0%`.
-   - Because rotational slip during thread engagement can cause the nut's actual descent $\Delta z_{\text{actual}}$ to lag behind the nominal pitch descent $\Delta z_{\text{nominal}}$, re-grasping at the nominal Z height would collide with the `Ø29 mm` bottom flange (`meas_gap > 21.2 mm`) instead of the `Ø20 mm` upper hex flats (`~18.5–19.8 mm`).
-   - Whenever `meas_gap > 21.2 mm` is detected on re-grasp, the controller automatically opens the gripper, backs off upward by `+3.5 mm` per retry (`z_backoff_m`), re-grasps the `Ø20 mm` hex body, and appends up to `3` adaptive extra ratchet strokes until the nut seats on the `z = 14.0 mm` screw head shoulder.
-4. **2-Stage Overhead Visual Refinement & Post-Task Verification (`common/vision.py`)**:
-   - Uses `solve_camera_lookdown_q` (`z_cam = 250 mm`) directly above the nut and screw before grasping/insertion to eliminate oblique camera parallax, and verifies final coaxially seated nut height upon completion.
+Shared options (`--mode`, `--headless`, `--ip`, `--calibration`, `--handeye`, `--camera-serial`, `--post-verify`, `--save-vis`, `--save-after-vis`, `--report`) and their defaults are in [`config.yaml`](config.yaml).
 
-## Running Tests
+## How it works
 
-```bash
-pytest assets/screw_nut/test_screw_nut.py examples/screw_nut/test_screw_nut_sim.py -v
-```
+**Simulation** (`screw_nut.py`)
+
+1. Grasp the hex body with the TCP 9 mm above the table (fingertips above the flange); the measured gap must be 12–24.5 mm.
+2. Lift, move above the screw, and lower the nut onto the screw tip (nut-to-screw offset ≤ 6 mm).
+3. Thread the nut: each stroke turns J6 clockwise while the TCP descends one pitch per turn. The turns are split into strokes that fit J6 ∈ [−360°, +360°]: 10 turns = 6 × 1.5 + 1 × 1.0 (7 strokes). Between strokes the gripper opens to 50 mm, J6 rotates back, and the gripper closes again.
+4. Release, retreat, and require 1 s of rest: nut seated on the screw head (z ≈ 14 mm), XY error ≤ 1.5 mm, tilt ≤ 5°.
+
+The collision model of the screw has 12 helical ridges (2.4 mm pitch) and the nut has 8 internal teeth, so a released nut stays on the thread. Finger pads use high friction (4.0); nut-to-screw contacts use low friction (0.10).
+
+**Sim-to-Real** (`sim2real.py`, `perception.py`)
+
+1. Capture one RGB-D frame and detect the nut and the screw (foreground segmentation against the green table mat + depth).
+2. Run the task in the calibrated digital twin. Every sample of the 50 Hz joint stream is checked for joint limits, collisions, wrist-camera height ≥ 88 mm above the table, and joint step ≤ 0.15 rad.
+3. `sdk-sim` replays the stream in the controller's simulation mode. `real`:
+   - re-measures the nut and the screw with the camera 250 mm directly above each, and replans;
+   - grasps with 25 % force; aborts if the measured gap is < 12 mm (empty grasp);
+   - before each J6 rewind, requires the gripper to open ≥ 42 mm (clear of the flange);
+   - after each regrip, a gap > 21.2 mm means the fingers slid onto the Ø29 mm flange: the gripper opens, the TCP rises 3.5–5.0 mm, and grasps again (≤ 3 times per stroke, ≤ 3 extra strokes added at the end);
+   - logs every stroke to `build/screw_nut/real_execution.log`.
+4. After returning, a frame from above the screw verifies the result (nut on the screw, XY error ≤ 15 mm, nut top height within 9 mm of the expected value, initial nut position empty).
+
+> [!NOTE]
+> The simulated thread pitch (2.4 mm) is larger than the real M12 pitch. On hardware the regrip-gap check above compensates for the difference.
+
+## Files
+
+| File | Content |
+| :--- | :--- |
+| `screw_nut.py` | `ScrewNutRobot`, `run_screw_nut`, CLI |
+| `perception.py` | `detect_nut_and_screw_overview`, `detect_nut_near`, `detect_screw_near`, `verify_threaded_nut` |
+| `sim2real.py` | digital-twin preflight, sdk-sim, real execution |
+| `scene.xml` | xArm 6 + G2, table, screw, nut |
+| `test_screw_nut_sim.py` | `pytest examples/screw_nut` |
+
+Object meshes and collision models are generated by [`assets/screw_nut/generate_screw_nut.py`](../../assets/screw_nut/generate_screw_nut.py).

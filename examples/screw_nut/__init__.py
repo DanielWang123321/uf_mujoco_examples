@@ -1,2 +1,3 @@
-"""M12 helical screw-nut threading and tactile Z-axis closed-loop control example."""
-
+# SPDX-License-Identifier: BSD-3-Clause
+# Copyright (c) 2026, UFACTORY Inc.
+"""Pick a hex flange nut and thread it onto an M12 screw fixed on the table."""

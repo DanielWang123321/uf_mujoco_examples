@@ -1,21 +1,26 @@
-"""Eye-in-Hand RGB-D multi-cup 6D pose estimation and closed-loop stack verification."""
+# SPDX-License-Identifier: BSD-3-Clause
+# Copyright (c) 2026, UFACTORY Inc.
+"""Eye-in-Hand RGB-D perception: multi-cup pose estimation and stack verification."""
 
 from __future__ import annotations
 
-import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import cv2
 import numpy as np
-from scipy.spatial.transform import Rotation
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from common.objects import paper_cup
+from common.objects.paper_cup import (
+    CUP_HALF_CONE_RAD,
+    CUP_HEIGHT_M,
+    GRASP_AXIS_OFFSET_M,
+    CupPoseEstimate,
+    sideways_cup_mujoco_pose,
+)
+from common.paths import DEFAULT_HANDEYE_YAML
 from common.vision import (
-    CAMERA_TOOL_SRC,
-    DEFAULT_HANDEYE_YAML,
-    PY312_PYTHON,
     WORKSPACE_BOUNDS_M,
     OrbbecCameraStream,
     PerceptionError,
@@ -26,47 +31,26 @@ from common.vision import (
     validate_xy_in_workspace,
 )
 
-# Cup physical dimensions from AGENTS.md
-CUP_HEIGHT_M = 0.088
-CUP_BOT_DIAM_M = 0.053
-CUP_TOP_DIAM_M = 0.075
-CUP_HALF_CONE_RAD = float(np.arctan2(0.5 * (CUP_TOP_DIAM_M - CUP_BOT_DIAM_M), CUP_HEIGHT_M))
-CUP_SPAWN_Z_OFFSET_M = 0.0375
+__all__ = [
+    "MIN_CUP_SEPARATION_M",
+    "WORKSPACE_BOUNDS_M",
+    "CupPoseEstimate",
+    "OrbbecCameraStream",
+    "PerceptionError",
+    "StackedCupsVerification",
+    "capture_rgbd_frame",
+    "detect_sideways_cups",
+    "detect_single_cup_near",
+    "load_handeye_calibration",
+    "pose_estimate_from_manual",
+    "pose_estimates_from_manual",
+    "save_multi_detection_overlay",
+    "save_post_stack_overlay",
+    "validate_xy_in_workspace",
+    "verify_stacked_cups",
+]
+
 MIN_CUP_SEPARATION_M = 0.075
-
-
-@dataclass(frozen=True)
-class CupPoseEstimate:
-    """Estimated 3D pose of a sideways paper cup in the robot base frame."""
-
-    cup_center_xy_m: tuple[float, float]
-    cup_bottom_xy_m: tuple[float, float]
-    cup_top_xy_m: tuple[float, float]
-    table_z_m: float
-    yaw_deg: float
-    mujoco_pos_m: tuple[float, float, float]
-    mujoco_quat_wxyz: tuple[float, float, float, float]
-    length_mm: float
-    width_bot_mm: float
-    width_top_mm: float
-    point_count: int
-    source: str = "camera"
-
-    def as_dict(self) -> dict[str, Any]:
-        return {
-            "source": self.source,
-            "cup_center_xy_m": list(self.cup_center_xy_m),
-            "cup_bottom_xy_m": list(self.cup_bottom_xy_m),
-            "cup_top_xy_m": list(self.cup_top_xy_m),
-            "table_z_m": float(self.table_z_m),
-            "yaw_deg": float(self.yaw_deg),
-            "mujoco_pos_m": list(self.mujoco_pos_m),
-            "mujoco_quat_wxyz": list(self.mujoco_quat_wxyz),
-            "length_mm": float(self.length_mm),
-            "width_bot_mm": float(self.width_bot_mm),
-            "width_top_mm": float(self.width_top_mm),
-            "point_count": int(self.point_count),
-        }
 
 
 @dataclass(frozen=True)
@@ -99,53 +83,6 @@ class StackedCupsVerification:
         }
 
 
-def sideways_cup_mujoco_pose(
-    bottom_xy_m: tuple[float, float] | np.ndarray,
-    yaw_deg: float,
-    table_z_m: float = 0.0,
-) -> tuple[np.ndarray, np.ndarray]:
-    """Compute MuJoCo freejoint (pos_m, quat_wxyz) for a sideways paper cup."""
-    bot = np.asarray(bottom_xy_m, dtype=np.float64).reshape(2)
-    pos_m = np.array([bot[0], bot[1], float(table_z_m) + CUP_SPAWN_Z_OFFSET_M], dtype=np.float64)
-    r_sideways = Rotation.from_euler("z", float(yaw_deg), degrees=True) * Rotation.from_euler(
-        "y", 90.0, degrees=True
-    )
-    q_xyzw = r_sideways.as_quat()
-    quat_wxyz = np.array([q_xyzw[3], q_xyzw[0], q_xyzw[1], q_xyzw[2]], dtype=np.float64)
-    return pos_m, quat_wxyz
-
-
-__all__ = [
-    "CAMERA_TOOL_SRC",
-    "CUP_BOT_DIAM_M",
-    "CUP_HALF_CONE_RAD",
-    "CUP_HEIGHT_M",
-    "CUP_SPAWN_Z_OFFSET_M",
-    "CUP_TOP_DIAM_M",
-    "DEFAULT_HANDEYE_YAML",
-    "MIN_CUP_SEPARATION_M",
-    "PY312_PYTHON",
-    "WORKSPACE_BOUNDS_M",
-    "CupPoseEstimate",
-    "OrbbecCameraStream",
-    "PerceptionError",
-    "StackedCupsVerification",
-    "capture_rgbd_frame",
-    "deproject_pixels_to_cam",
-    "detect_sideways_cups",
-    "detect_single_cup_near",
-    "load_handeye_calibration",
-    "pose_estimate_from_manual",
-    "pose_estimates_from_manual",
-    "project_cam_to_pixels",
-    "save_multi_detection_overlay",
-    "save_post_stack_overlay",
-    "sideways_cup_mujoco_pose",
-    "validate_xy_in_workspace",
-    "verify_stacked_cups",
-]
-
-
 def pose_estimate_from_manual(
     bottom_x_m: float,
     bottom_y_m: float,
@@ -154,34 +91,9 @@ def pose_estimate_from_manual(
     table_z_m: float = 0.0,
     bounds: dict[str, float] = WORKSPACE_BOUNDS_M,
 ) -> CupPoseEstimate:
-    """Build a validated CupPoseEstimate from manually supplied (bottom_x, bottom_y, yaw_deg)."""
-    bot_xy = np.array([float(bottom_x_m), float(bottom_y_m)], dtype=np.float64)
-    yaw_rad = float(np.deg2rad(yaw_deg))
-    axis_xy = np.array([np.cos(yaw_rad), np.sin(yaw_rad)], dtype=np.float64)
-    horiz_len = CUP_HEIGHT_M * float(np.cos(CUP_HALF_CONE_RAD))
-    mid_xy = bot_xy + 0.5 * horiz_len * axis_xy
-    top_xy = bot_xy + horiz_len * axis_xy
-    grasp_xy = bot_xy + 0.040 * axis_xy
-    validate_xy_in_workspace(grasp_xy, "纸杯抓取中心", bounds)
-    pos_m, quat_wxyz = sideways_cup_mujoco_pose(bot_xy, yaw_deg, table_z_m=table_z_m)
-    return CupPoseEstimate(
-        cup_center_xy_m=(float(mid_xy[0]), float(mid_xy[1])),
-        cup_bottom_xy_m=(float(bot_xy[0]), float(bot_xy[1])),
-        cup_top_xy_m=(float(top_xy[0]), float(top_xy[1])),
-        table_z_m=float(table_z_m),
-        yaw_deg=float(yaw_deg),
-        mujoco_pos_m=(float(pos_m[0]), float(pos_m[1]), float(pos_m[2])),
-        mujoco_quat_wxyz=(
-            float(quat_wxyz[0]),
-            float(quat_wxyz[1]),
-            float(quat_wxyz[2]),
-            float(quat_wxyz[3]),
-        ),
-        length_mm=CUP_HEIGHT_M * 1000.0,
-        width_bot_mm=CUP_BOT_DIAM_M * 1000.0,
-        width_top_mm=CUP_TOP_DIAM_M * 1000.0,
-        point_count=0,
-        source="manual",
+    """Validated ``CupPoseEstimate`` from a manual (bottom_x, bottom_y, yaw_deg)."""
+    return paper_cup.pose_estimate_from_manual(
+        bottom_x_m, bottom_y_m, yaw_deg, bounds=bounds, table_z_m=table_z_m
     )
 
 
@@ -196,8 +108,8 @@ def pose_estimates_from_manual(
     vals = [float(v) for v in flat_values]
     if len(vals) % 3 != 0 or len(vals) // 3 < num_cups:
         raise PerceptionError(
-            f"--cup-poses 参数数量必须是 3 的倍数且不少于 {num_cups} 个纸杯 "
-            f"(共需 {3 * num_cups} 个数值)"
+            f"--cup-poses needs a multiple of 3 values covering at least {num_cups} cups "
+            f"({3 * num_cups} values)"
         )
     estimates: list[CupPoseEstimate] = []
     for idx in range(num_cups):
@@ -210,13 +122,11 @@ def pose_estimates_from_manual(
         )
         for prev_idx, prev in enumerate(estimates):
             dist = float(
-                np.linalg.norm(
-                    np.asarray(est.cup_center_xy_m) - np.asarray(prev.cup_center_xy_m)
-                )
+                np.linalg.norm(np.asarray(est.cup_center_xy_m) - np.asarray(prev.cup_center_xy_m))
             )
             if dist < MIN_CUP_SEPARATION_M:
                 raise PerceptionError(
-                    f"纸杯 #{idx + 1} 与纸杯 #{prev_idx + 1} 中心间距过近 "
+                    f"Cup #{idx + 1} is too close to cup #{prev_idx + 1} "
                     f"({dist * 1000:.1f} mm < {MIN_CUP_SEPARATION_M * 1000:.0f} mm)"
                 )
         estimates.append(est)
@@ -278,10 +188,10 @@ def _estimate_single_component_pose(
     half_horiz_len = 0.5 * CUP_HEIGHT_M * float(np.cos(CUP_HALF_CONE_RAD))
     bot_xy = mid_xy - half_horiz_len * axis_xy
     top_xy = mid_xy + half_horiz_len * axis_xy
-    grasp_xy = bot_xy + 0.040 * axis_xy
+    grasp_xy = bot_xy + GRASP_AXIS_OFFSET_M * axis_xy
 
     try:
-        validate_xy_in_workspace(grasp_xy, "感知到的纸杯抓取中心", workspace_bounds)
+        validate_xy_in_workspace(grasp_xy, "Detected cup grasp center", workspace_bounds)
     except PerceptionError:
         return None
 
@@ -319,7 +229,7 @@ def detect_sideways_cups(
 ) -> tuple[list[CupPoseEstimate], dict[str, Any]]:
     """Segment multiple white sideways paper cups and estimate their 6D poses in base frame."""
     if num_cups < 2:
-        raise ValueError(f"多纸杯检测要求 num_cups >= 2，当前: {num_cups}")
+        raise ValueError(f"Multi-cup detection requires num_cups >= 2, got: {num_cups}")
 
     handeye = load_handeye_calibration(handeye_yaml)
     cam_cfg = handeye["camera"]
@@ -327,22 +237,20 @@ def detect_sideways_cups(
     t_base_cam = np.asarray(t_base_flange, dtype=np.float64).reshape(4, 4) @ x_flange_cam
 
     if color_bgr is None or depth_m is None or color_bgr.shape[:2] != depth_m.shape[:2]:
-        raise PerceptionError("输入的 RGB 与深度图尺寸无效或不匹配")
+        raise PerceptionError("RGB and depth images are invalid or have different sizes")
 
     h, w = depth_m.shape
     ys, xs = np.mgrid[0:h, 0:w]
     fov_mask = (
-        (ys >= int(0.18 * h))
-        & (ys < int(0.73 * h))
-        & (xs >= int(0.18 * w))
-        & (xs < int(0.92 * w))
+        (ys >= int(0.06 * h)) & (ys < int(0.73 * h)) & (xs >= int(0.18 * w)) & (xs < int(0.92 * w))
     )
     depth_valid = np.isfinite(depth_m) & (depth_m > 0.07) & (depth_m < 0.75) & fov_mask
     if int(np.count_nonzero(depth_valid)) < 500:
-        raise PerceptionError("有效深度像素不足，无法定位桌面或纸杯")
+        raise PerceptionError("Not enough valid depth pixels to locate the table or cups")
 
     hsv = cv2.cvtColor(color_bgr, cv2.COLOR_BGR2HSV)
-    white_mask = (hsv[:, :, 1] < 75) & (hsv[:, :, 2] > 155) & fov_mask
+    is_green = (hsv[:, :, 0] >= 65) & (hsv[:, :, 0] <= 105) & (hsv[:, :, 1] >= 25)
+    white_mask = (~is_green) & (hsv[:, :, 1] < 75) & (hsv[:, :, 2] > 155) & fov_mask
     white_u8 = cv2.morphologyEx(
         white_mask.astype(np.uint8) * 255,
         cv2.MORPH_OPEN,
@@ -413,7 +321,7 @@ def detect_sideways_cups(
 
     if len(selected) < num_cups:
         raise PerceptionError(
-            f"在安全工作区内仅检测到 {len(selected)} 个有效白色一次性纸杯，少于所需的 {num_cups} 个"
+            f"Only {len(selected)} valid paper cups detected in the workspace, {num_cups} required"
         )
 
     # Order from right (-Y) to left (+Y) so Cup #1 is placed as the base cup first
@@ -450,21 +358,16 @@ def detect_single_cup_near(
     t_base_cam = np.asarray(t_base_flange, dtype=np.float64).reshape(4, 4) @ x_flange_cam
     exp_xy = np.asarray(expected_xy_m, dtype=np.float64).reshape(2)
     excl_xy = (
-        np.asarray(exclude_xy_m, dtype=np.float64).reshape(2)
-        if exclude_xy_m is not None
-        else None
+        np.asarray(exclude_xy_m, dtype=np.float64).reshape(2) if exclude_xy_m is not None else None
     )
 
     if color_bgr is None or depth_m is None or color_bgr.shape[:2] != depth_m.shape[:2]:
-        raise PerceptionError("输入的 RGB 与深度图尺寸无效或不匹配")
+        raise PerceptionError("RGB and depth images are invalid or have different sizes")
 
     h, w = depth_m.shape
     ys, xs = np.mgrid[0:h, 0:w]
     fov_mask = (
-        (ys >= int(0.06 * h))
-        & (ys < int(0.73 * h))
-        & (xs >= int(0.06 * w))
-        & (xs < int(0.94 * w))
+        (ys >= int(0.06 * h)) & (ys < int(0.73 * h)) & (xs >= int(0.06 * w)) & (xs < int(0.94 * w))
     )
     depth_valid = np.isfinite(depth_m) & (depth_m > 0.07) & (depth_m < 0.75) & fov_mask
     if int(np.count_nonzero(depth_valid)) < 300:
@@ -477,7 +380,8 @@ def detect_single_cup_near(
         }
 
     hsv = cv2.cvtColor(color_bgr, cv2.COLOR_BGR2HSV)
-    white_mask = (hsv[:, :, 1] < 80) & (hsv[:, :, 2] > 150) & fov_mask
+    is_green = (hsv[:, :, 0] >= 65) & (hsv[:, :, 0] <= 105) & (hsv[:, :, 1] >= 25)
+    white_mask = (~is_green) & (hsv[:, :, 1] < 80) & (hsv[:, :, 2] > 150) & fov_mask
     white_u8 = cv2.morphologyEx(
         white_mask.astype(np.uint8) * 255,
         cv2.MORPH_OPEN,
@@ -638,7 +542,7 @@ def save_multi_detection_overlay(
             )
             cv2.putText(
                 canvas,
-                f"Stack Target ({tgt[0]*1000:.0f},{tgt[1]*1000:.0f})mm",
+                f"Stack Target ({tgt[0] * 1000:.0f},{tgt[1] * 1000:.0f})mm",
                 (int(tgt_uv[0]) - 85, int(tgt_uv[1]) + 38),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.55,
@@ -651,8 +555,8 @@ def save_multi_detection_overlay(
     cv2.rectangle(canvas, (12, 12), (1140, 12 + box_h), (25, 25, 25), -1)
     for idx, est in enumerate(estimates):
         line = (
-            f"Cup #{idx + 1}: bot=({est.cup_bottom_xy_m[0]*1000:.1f}, "
-            f"{est.cup_bottom_xy_m[1]*1000:.1f})mm yaw={est.yaw_deg:.1f}deg "
+            f"Cup #{idx + 1}: bot=({est.cup_bottom_xy_m[0] * 1000:.1f}, "
+            f"{est.cup_bottom_xy_m[1] * 1000:.1f})mm yaw={est.yaw_deg:.1f}deg "
             f"L={est.length_mm:.1f}mm W={est.width_bot_mm:.1f}->{est.width_top_mm:.1f}mm "
             f"pts={est.point_count}"
         )
@@ -720,9 +624,7 @@ def verify_stacked_cups(
     hull = cv2.convexHull(cyl_uv)
 
     ys, xs = np.mgrid[0:h, 0:w]
-    dome_mask = (
-        ((xs - 0.50 * w) / (0.35 * w)) ** 2 + ((ys - 1.11 * h) / (0.27 * h)) ** 2
-    ) <= 1.0
+    dome_mask = (((xs - 0.50 * w) / (0.35 * w)) ** 2 + ((ys - 1.11 * h) / (0.27 * h)) ** 2) <= 1.0
     roi_mask = np.zeros((h, w), dtype=np.uint8)
     cv2.fillConvexPoly(roi_mask, hull, 255)
     roi_bool = (roi_mask > 0) & (~dome_mask)
@@ -816,13 +718,17 @@ def verify_stacked_cups(
     xy_error_mm = float(np.linalg.norm(measured_xy - target) * 1000.0)
     reasons: list[str] = []
     if roi_cup_pixels < 1200:
-        reasons.append(f"目标堆叠区纸杯像素不足 ({roi_cup_pixels} < 1200)")
+        reasons.append(f"Too few cup pixels in the stack ROI ({roi_cup_pixels} < 1200)")
     if xy_error_mm > 45.0:
-        reasons.append(f"堆叠水平位置偏差过大 ({xy_error_mm:.1f} mm > 45.0 mm)")
+        reasons.append(f"Stack XY error too large ({xy_error_mm:.1f} mm > 45.0 mm)")
     if point_count >= 150 and rim_height_mm < 50.0:
-        reasons.append(f"堆叠顶层杯口高度偏低 ({rim_height_mm:.1f} mm < 50.0 mm)，疑似倾倒")
+        reasons.append(
+            f"Top rim too low ({rim_height_mm:.1f} mm < 50.0 mm); stack may have tipped over"
+        )
     if not cleared_initial:
-        reasons.append("初始抓取位置仍有侧卧纸杯残留点云，疑似漏抓")
+        reasons.append(
+            "Sideways cup points remain at an initial pick site; a cup may have been missed"
+        )
 
     ok = len(reasons) == 0
     verification = StackedCupsVerification(
@@ -835,7 +741,7 @@ def verify_stacked_cups(
         point_count=point_count,
         roi_cup_pixels=roi_cup_pixels,
         cleared_initial_sites=cleared_initial,
-        reason="ok" if ok else "；".join(reasons),
+        reason="ok" if ok else "; ".join(reasons),
     )
     debug_info = {
         "cup_mask": cup_mask,
@@ -891,7 +797,7 @@ def save_post_stack_overlay(
     status_str = "PASS" if verification.ok else f"FAIL ({verification.reason})"
     summary = (
         f"Post-Stack ({verification.num_cups} cups): {status_str} | "
-        f"target=({verification.target_xy_m[0]*1000:.0f},{verification.target_xy_m[1]*1000:.0f})mm "
+        f"target=({verification.target_xy_m[0] * 1000:.0f},{verification.target_xy_m[1] * 1000:.0f})mm "
         f"err={verification.xy_error_mm:.1f}mm rim_z={verification.rim_height_mm:.1f}mm "
         f"px={verification.roi_cup_pixels}"
     )
@@ -910,4 +816,3 @@ def save_post_stack_overlay(
     out.parent.mkdir(parents=True, exist_ok=True)
     cv2.imwrite(str(out), canvas)
     return out
-

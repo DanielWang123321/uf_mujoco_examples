@@ -1,4 +1,6 @@
-"""Unit and MuJoCo physics tests for the 0.0.3 screw and nut 3D assets."""
+# SPDX-License-Identifier: BSD-3-Clause
+# Copyright (c) 2026, UFACTORY Inc.
+"""Unit and MuJoCo physics tests for the screw and nut 3D assets."""
 
 from __future__ import annotations
 
@@ -42,7 +44,7 @@ def _check_watertight_manifold(vertices: np.ndarray, faces: np.ndarray) -> tuple
 
 
 def test_screw_mesh_watertight_and_dimensions() -> None:
-    """Verify screw mesh is watertight (genus 0, chi=2) and matches prd.md 0.0.3 specs."""
+    """Verify screw mesh is watertight (genus 0, chi=2) and matches the measured specs."""
     verts, faces = build_screw_mesh()
     ok, chi = _check_watertight_manifold(verts, faces)
     assert ok, "Screw mesh is not a watertight 2-manifold"
@@ -63,7 +65,7 @@ def test_screw_mesh_watertight_and_dimensions() -> None:
 
 
 def test_nut_mesh_watertight_and_dimensions() -> None:
-    """Verify nut mesh is a watertight torus (genus 1, chi=0) and matches prd.md + scan specs."""
+    """Verify nut mesh is a watertight torus (genus 1, chi=0) and matches the measured + scanned specs."""
     verts, faces = build_nut_mesh()
     ok, chi = _check_watertight_manifold(verts, faces)
     assert ok, "Nut mesh is not a watertight 2-manifold"

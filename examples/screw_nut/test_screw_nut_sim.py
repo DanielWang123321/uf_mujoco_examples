@@ -1,45 +1,33 @@
-"""Unit and end-to-end physics tests for the 0.0.3 xArm 6 nut-threading simulation & closed-loop module."""
+# SPDX-License-Identifier: BSD-3-Clause
+# Copyright (c) 2026, UFACTORY Inc.
+"""Simulation, trajectory, and synthetic-perception tests for screw_nut (no hardware needed)."""
 
 from __future__ import annotations
-
-import sys
-from pathlib import Path
 
 import mujoco
 import numpy as np
 import pytest
 import yaml
+from ufactory_mujoco.calibration import load_kinematics_calibration
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-import screw_nut as demo
-from screw_nut import (
+from common.motion import interpolate_waypoint_chain
+from common.paths import SAMPLE_CALIBRATION_YAML, SAMPLE_HANDEYE_YAML
+from common.sim import TaskError
+from common.sim2real import flange_pose
+from examples.screw_nut import perception, sim2real
+from examples.screw_nut import screw_nut as demo
+from examples.screw_nut.screw_nut import (
     MAX_CONTACT_LOSS_S,
     NUT_BODY,
     NUT_MASS_KG,
     SCREW_BODY,
     SCREW_HEAD_LEN_M,
     SCREW_MASS_KG,
-    DemoError,
     InitialNutPose,
     ScrewNutRobot,
     ScrewNutWaypoints,
     run_screw_nut,
 )
-
-
-@pytest.fixture(autouse=True)
-def _isolate_local_modules() -> None:
-    local_dir = Path(__file__).resolve().parent
-    local_str = str(local_dir)
-    if sys.path[0] != local_str:
-        if local_str in sys.path:
-            sys.path.remove(local_str)
-        sys.path.insert(0, local_str)
-    for mod_name in ("perception", "sim2real"):
-        mod = sys.modules.get(mod_name)
-        if mod is not None and Path(getattr(mod, "__file__", "")).resolve().parent != local_dir:
-            sys.modules.pop(mod_name, None)
 
 
 def test_scene_loading_and_fixed_screw() -> None:
@@ -48,7 +36,9 @@ def test_scene_loading_and_fixed_screw() -> None:
         screw_id = robot.model.body(SCREW_BODY).id
         nut_id = robot.model.body(NUT_BODY).id
 
-        assert int(robot.model.body_dofnum[screw_id]) == 0, "Screw must have 0 DOFs (glued to table)"
+        assert int(robot.model.body_dofnum[screw_id]) == 0, (
+            "Screw must have 0 DOFs (glued to table)"
+        )
         assert int(robot.model.body_dofnum[nut_id]) == 6, "Nut must have 6 DOFs (freejoint)"
 
         assert np.isclose(robot.model.body_subtreemass[screw_id], SCREW_MASS_KG, atol=1e-6)
@@ -148,11 +138,7 @@ def test_j6_high_turn_headroom_within_360_limits() -> None:
 
 def test_screw_nut_trajectory_smooth_deceleration_and_soft_landing() -> None:
     """Verify common.motion trajectory interpolation provides zero endpoint vel, bounded acc, and soft-landing."""
-    import perception
-    import sim2real
-    from ufactory_mujoco.calibration import load_kinematics_calibration
-
-    calib = load_kinematics_calibration(sim2real.DEFAULT_CALIBRATION_YAML, robot="xarm6")
+    calib = load_kinematics_calibration(SAMPLE_CALIBRATION_YAML, robot="xarm6")
     nut_est, screw_est = perception.pose_estimates_from_manual(
         (0.3538, -0.0114),
         0.0,
@@ -165,6 +151,7 @@ def test_screw_nut_trajectory_smooth_deceleration_and_soft_landing() -> None:
         thread_turns=3.0,
         q_init=q_obs,
         calibration=calib,
+        handeye_yaml=SAMPLE_HANDEYE_YAML,
         headless=True,
     )
     assert report.ok, f"Digital twin preflight failed: {report.failures}"
@@ -180,7 +167,7 @@ def test_screw_nut_trajectory_smooth_deceleration_and_soft_landing() -> None:
         ("retreat_to_obs", report.waypoints.retreat_waypoints, False),
     ]
     for name, wps, soft_land in phases:
-        seg = sim2real._interpolate_waypoint_chain(q_cur, wps, dt=dt, soft_landing=soft_land)
+        seg = interpolate_waypoint_chain(q_cur, wps, dt=dt, soft_landing=soft_land)
         qd = np.diff(seg, axis=0) / dt
         max_qd = np.max(np.abs(qd), axis=1)
         qdd = np.diff(qd, axis=0) / dt
@@ -212,25 +199,21 @@ def test_pre_grasp_missing_nut_or_empty_grasp_aborts(monkeypatch) -> None:
                 orig_pose(r)[1],
             ),
         )
-        with pytest.raises(DemoError, match="抓取前闭环拦截：螺母缺失或移出搜索半径"):
+        with pytest.raises(TaskError, match="nut missing or outside the search radius"):
             run_screw_nut(robot, thread_turns=1.5)
 
     # Case 2: Gripper G2 closes to < 12.0 mm (empty grasp) -> must abort before lifting
     monkeypatch.setattr(demo, "_nut_pose", orig_pose)
     with ScrewNutRobot(viewer=False) as robot:
         monkeypatch.setattr(robot, "get_measured_gripper_gap", lambda: 0.005)
-        with pytest.raises(DemoError, match="闭环夹持拦截：实测夹持开度过小"):
+        with pytest.raises(TaskError, match="measured gap too small"):
             run_screw_nut(robot, thread_turns=1.5)
 
 
 def test_lookdown_camera_and_synthetic_rgbd_closed_loop(tmp_path) -> None:
     """Verify solve_camera_lookdown_q alignment, look-down nut/screw refinement, and post-thread verification."""
-    import perception
-    import sim2real
-    from ufactory_mujoco.calibration import load_kinematics_calibration
-
-    calib = load_kinematics_calibration(sim2real.DEFAULT_CALIBRATION_YAML, robot="xarm6")
-    handeye = perception.load_handeye_calibration()
+    calib = load_kinematics_calibration(SAMPLE_CALIBRATION_YAML, robot="xarm6")
+    handeye = perception.load_handeye_calibration(SAMPLE_HANDEYE_YAML)
     x_fc = np.asarray(handeye["extrinsics"]["X_flange_cam"], dtype=np.float64)
     q_seed = np.array([0.0, -0.55, -0.35, 0.0, 0.90, 0.0], dtype=np.float64)
 
@@ -241,15 +224,12 @@ def test_lookdown_camera_and_synthetic_rgbd_closed_loop(tmp_path) -> None:
         z_cam_m=0.250,
         q_seed=q_seed,
         calibration=calib,
+        handeye_yaml=SAMPLE_HANDEYE_YAML,
     )
     with ScrewNutRobot(viewer=False, calibration=calib) as sim_robot:
         sim_robot.data.qpos[:6] = q_cam
         mujoco.mj_forward(sim_robot.model, sim_robot.data)
-        link6_id = mujoco.mj_name2id(sim_robot.model, mujoco.mjtObj.mjOBJ_BODY, "link6")
-        t_bf = np.eye(4, dtype=np.float64)
-        t_bf[:3, :3] = sim_robot.data.xmat[link6_id].reshape(3, 3)
-        t_bf[:3, 3] = sim_robot.data.xpos[link6_id]
-        t_bc = t_bf @ x_fc
+        t_bc = flange_pose(sim_robot.model, sim_robot.data) @ x_fc
         assert np.allclose(t_bc[:3, 3], [0.354, -0.011, 0.250], atol=0.002)
 
     # 2. Synthetic look-down RGB-D test for detect_nut_near, detect_screw_near, and verify_threaded_nut
@@ -399,9 +379,6 @@ def test_lookdown_camera_and_synthetic_rgbd_closed_loop(tmp_path) -> None:
 
 def test_z_axis_closed_loop_adaptation_under_slip() -> None:
     """Verify tactile gripper-gap Z-axis adaptation and adaptive continuation strokes under 25% axial slip."""
-    import sim2real
-    from ufactory_mujoco.calibration import load_kinematics_calibration
-
     wps = ScrewNutWaypoints()
     with ScrewNutRobot(viewer=False) as robot:
         metrics = run_screw_nut(
@@ -414,21 +391,23 @@ def test_z_axis_closed_loop_adaptation_under_slip() -> None:
     assert metrics["z_adapt_count"] >= 2
     assert metrics["z_adapt_total_mm"] >= 7.0
     assert metrics["adaptive_extra_strokes"] >= 1
-    assert metrics["stroke_count"] == metrics["nominal_stroke_count"] + metrics["adaptive_extra_strokes"]
+    assert (
+        metrics["stroke_count"]
+        == metrics["nominal_stroke_count"] + metrics["adaptive_extra_strokes"]
+    )
     assert all(12.0 <= g <= demo.MAX_HEX_FLAT_GAP_MM for g in metrics["regrip_gaps_mm"])
     assert abs(metrics["nut_z_mm"] - SCREW_HEAD_LEN_M * 1000.0) < 1.2
     assert metrics["xy_error_mm"] < 1.5
     assert metrics["joint_limits"]["within_limits"] is True
 
-    # Also verify sim2real._shift_waypoints_cartesian_z shifts TCP Z accurately while preserving J6
-    calib = load_kinematics_calibration(sim2real.DEFAULT_CALIBRATION_YAML, robot="xarm6")
-    checker = sim2real.make_screw_nut_collision_checker(demo.SCENE, calibration=calib)
+    # shift_waypoints_z must move the TCP vertically and keep J6.
+    calib = load_kinematics_calibration(SAMPLE_CALIBRATION_YAML, robot="xarm6")
+    checker = sim2real.make_screw_nut_collision_checker(calib)
     stroke0 = wps.stroke_waypoints[0]
-    shifted = sim2real._shift_waypoints_cartesian_z(checker, stroke0, 0.0036)
+    shifted = sim2real.shift_waypoints_z(checker, stroke0, 0.0036)
     assert len(shifted) == len(stroke0)
     for q_orig, q_new in zip(stroke0, shifted, strict=True):
         assert np.isclose(q_orig[5], q_new[5], atol=1e-7)
-        z0 = sim2real._get_waypoint_tcp_z(checker, q_orig)
-        z1 = sim2real._get_waypoint_tcp_z(checker, q_new)
+        z0 = sim2real.waypoint_tcp_z(checker, q_orig)
+        z1 = sim2real.waypoint_tcp_z(checker, q_new)
         assert abs((z1 - z0) - 0.0036) < 2e-4
-

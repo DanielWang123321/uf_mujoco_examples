@@ -1,0 +1,37 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.14"]
+    env:
+      MUJOCO_GL: egl
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: uf_mujoco_examples
+      - uses: actions/checkout@v4
+        with:
+          repository: DanielWang123321/ufactory_mujoco
+          path: ufactory_mujoco
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install
+        working-directory: uf_mujoco_examples
+        run: pip install -e ".[dev]"
+      - name: Lint
+        working-directory: uf_mujoco_examples
+        run: |
+          ruff check .
+          ruff format --check .
+      - name: Test
+        working-directory: uf_mujoco_examples
+        run: pytest -q

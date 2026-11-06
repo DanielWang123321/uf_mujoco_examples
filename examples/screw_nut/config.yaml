@@ -1,21 +1,21 @@
-# xArm 6 拧螺母 (螺丝胶水固定于桌面) 配置文件
-# 运行模式: sim (默认纯 MuJoCo 仿真) | dry-run | sdk-sim | real
-mode: sim
-headless: false  # false: 默认弹出 MuJoCo 3D 可视化窗口；true: 无头模式后台运行
+# screw_nut configuration. Priority: command-line flag > this file > built-in default.
+mode: sim         # sim (MuJoCo only) | dry-run | sdk-sim | real
+headless: false   # true: run the simulation / digital twin without the viewer
 
 robot:
   ip: "192.168.1.60"
-  calibration: "../ufactory_mujoco/calibrations/xarm6_kinematics_L56A01.yaml"
+  calibration: "calibration/xarm6_kinematics.yaml"   # see calibration/README.md
 
 camera:
-  handeye: "../camera_tool/result/eye_in_hand.yaml"
+  handeye: "calibration/eye_in_hand.yaml"           # see calibration/README.md
+  serial: ""        # Orbbec serial number; empty: first camera found
 
 task:
-  nut_xy: [0.3538, -0.0114]    # 螺母初始桌面坐标 [x_m, y_m] (基于 Gemini 305 实测)
-  nut_yaw_deg: 0.0             # 螺母初始绕 Z 轴偏航角 (deg)
-  screw_xy: [0.3560, -0.1028]  # 胶水固定螺丝的桌面中心坐标 [x_m, y_m]
-  thread_turns: 10.0           # 螺母套入螺杆后的顺时针旋紧圈数 (默认 10.0 圈 = 3600°，分 7 把倒手旋紧至底部肩台)
-  post_verify: true            # 完成拧螺母后是否通过 Gemini 305 正上方拍照进行闭环确认
+  nut_xy: [0.3538, -0.0114]    # initial nut position [x, y] (m), simulation
+  nut_yaw_deg: 0.0             # initial nut yaw (deg), simulation
+  screw_xy: [0.3560, -0.1028]  # position of the screw glued on the table [x, y] (m), simulation
+  thread_turns: 10.0           # clockwise turns after the nut is on the screw tip (7 strokes)
+  post_verify: true            # after a real run, re-capture the scene and verify the nut
   save_vis: "build/screw_nut/real_detection.png"
   save_after_vis: "build/screw_nut/real_after_thread.png"
   report: "build/screw_nut/sim_report.json"

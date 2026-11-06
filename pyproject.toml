@@ -7,17 +7,20 @@ name = "uf_mujoco_examples"
 version = "0.0.3"
 description = "Contact-rich MuJoCo manipulation and Sim-to-Real examples for UFACTORY xArm 6 + Gripper G2 + Orbbec Gemini 305"
 readme = "README.md"
-license = "MIT"
+license = "BSD-3-Clause"
 license-files = ["LICENSE", "NOTICE"]
 requires-python = ">=3.12"
+authors = [{ name = "UFACTORY Inc." }]
+keywords = ["mujoco", "xarm", "ufactory", "robotics", "sim-to-real", "manipulation"]
 dependencies = [
     "mujoco>=3.15,<4",
-    "numpy>=2.0,<3",
+    "numpy>=2.3,<3",
     "scipy>=1.14,<2",
     "pyyaml>=6.0,<7",
-    "opencv-python>=4.8,<5",
+    "opencv-python>=4.13,<5",
 ]
 classifiers = [
+    "Operating System :: POSIX :: Linux",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
     "Programming Language :: Python :: 3.14",
@@ -26,23 +29,28 @@ classifiers = [
 ]
 
 [project.optional-dependencies]
+# Hardware modes (dry-run / sdk-sim / real): xArm SDK and Orbbec SDK
+real = [
+    "xarm-python-sdk>=1.18",
+    "pyorbbecsdk2>=2.1",
+]
 dev = [
     "pytest>=8.0",
     "ruff>=0.6",
-    "trimesh>=4.0",
 ]
+
+[project.urls]
+# Repository locations (update here when the repositories move).
+Homepage = "https://github.com/DanielWang123321/uf_mujoco_examples"
+Dependencies = "https://github.com/DanielWang123321/ufactory_mujoco"
 
 [tool.setuptools.packages.find]
 include = ["common*", "examples*"]
 namespaces = false
 
 [tool.pytest.ini_options]
-testpaths = [
-    "assets/screw_nut",
-    "examples/pick_cup",
-    "examples/stack_cups",
-    "examples/screw_nut",
-]
+pythonpath = ["."]
+testpaths = ["assets", "examples"]
 
 [tool.ruff]
 line-length = 100
@@ -51,4 +59,7 @@ target-version = "py312"
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "UP", "B"]
 ignore = ["E402", "E501"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["common", "examples"]
 

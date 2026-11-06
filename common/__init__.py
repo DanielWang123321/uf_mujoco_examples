@@ -1,49 +1,23 @@
-"""Shared motion smoothing, soft-landing deceleration, and Eye-in-Hand vision closed-loop utilities."""
+# SPDX-License-Identifier: BSD-3-Clause
+# Copyright (c) 2026, UFACTORY Inc.
+"""Shared building blocks for the uf_mujoco_examples tasks.
+
+Modules
+-------
+- ``paths``    : repository / sibling-repository paths and the ``ufactory_mujoco`` bootstrap.
+- ``cli``      : YAML config loading and the CLI options shared by every example.
+- ``geometry`` : small quaternion / vector helpers.
+- ``sim``      : ``TaskSimRobot`` base class and MuJoCo contact helpers.
+- ``motion``   : joint-space smoothing, soft landing, Cartesian IK segments, real-robot streaming.
+- ``camera``   : Orbbec RGB-D capture (``pyorbbecsdk``), depth aligned to color.
+- ``vision``   : hand-eye calibration, Eye-in-Hand projection, camera look-down IK.
+- ``sim2real`` : collision checker factory, config hashing, JSON reports.
+- ``objects``  : physical object models shared by several examples (e.g. the paper cup).
+"""
 
 from __future__ import annotations
 
-from common.motion import (
-    interpolate_waypoint_chain,
-    read_real_gripper_gap_mm,
-    smooth_progress_profile,
-    smooth_step_durations,
-    solve_cartesian_segment,
-    stream_waypoints_on_real,
-)
-from common.vision import (
-    CAMERA_TOOL_SRC,
-    DEFAULT_HANDEYE_YAML,
-    PY312_PYTHON,
-    WORKSPACE_BOUNDS_M,
-    OrbbecCameraStream,
-    PerceptionError,
-    capture_rgbd_frame,
-    compute_flange_and_cam_poses,
-    deproject_pixels_to_cam,
-    load_handeye_calibration,
-    project_cam_to_pixels,
-    solve_camera_lookdown_q,
-    validate_xy_in_workspace,
-)
+from common.paths import ensure_ufactory_mujoco
 
-__all__ = [
-    "CAMERA_TOOL_SRC",
-    "DEFAULT_HANDEYE_YAML",
-    "PY312_PYTHON",
-    "WORKSPACE_BOUNDS_M",
-    "OrbbecCameraStream",
-    "PerceptionError",
-    "capture_rgbd_frame",
-    "compute_flange_and_cam_poses",
-    "deproject_pixels_to_cam",
-    "interpolate_waypoint_chain",
-    "load_handeye_calibration",
-    "project_cam_to_pixels",
-    "read_real_gripper_gap_mm",
-    "smooth_progress_profile",
-    "smooth_step_durations",
-    "solve_camera_lookdown_q",
-    "solve_cartesian_segment",
-    "stream_waypoints_on_real",
-    "validate_xy_in_workspace",
-]
+# Must run before any submodule imports ``ufactory_mujoco``.
+ensure_ufactory_mujoco()

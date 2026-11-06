@@ -1,28 +1,16 @@
-"""Physical acceptance and failure paths for the paper-cup pick-and-place example."""
-
-import sys
-from pathlib import Path
+# SPDX-License-Identifier: BSD-3-Clause
+# Copyright (c) 2026, UFACTORY Inc.
+"""Physical acceptance and failure-path tests for the paper-cup pick-and-place example."""
 
 import mujoco
 import numpy as np
 import pytest
+import yaml
+from ufactory_mujoco.grippers import bodies_in_contact
+from ufactory_mujoco.safety import SafetyGateError, enforce_single_cycle
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-import pick_cup as demo
-
-
-@pytest.fixture(autouse=True)
-def _isolate_local_modules() -> None:
-    local_dir = Path(__file__).resolve().parent
-    local_str = str(local_dir)
-    if sys.path[0] != local_str:
-        if local_str in sys.path:
-            sys.path.remove(local_str)
-        sys.path.insert(0, local_str)
-    for mod_name in ("perception", "sim2real"):
-        mod = sys.modules.get(mod_name)
-        if mod is not None and Path(getattr(mod, "__file__", "")).resolve().parent != local_dir:
-            sys.modules.pop(mod_name, None)
+from examples.pick_cup import perception, sim2real
+from examples.pick_cup import pick_cup as demo
 
 
 @pytest.fixture
@@ -42,15 +30,15 @@ def test_headless_pick_places_and_stands_without_finger_support(robot):
     assert result["max_grasp_rotation_deg"] < demo.MAX_GRASP_ROTATION_DEG
     assert result["max_contact_loss_s"] <= demo.MAX_CONTACT_LOSS_S
     assert demo._contact_between(robot, "table", "cup_bottom")
-    assert not demo.bodies_in_contact(robot.model, robot.data, "left_finger", demo.CUP)
-    assert not demo.bodies_in_contact(robot.model, robot.data, "right_finger", demo.CUP)
+    assert not bodies_in_contact(robot.model, robot.data, "left_finger", demo.CUP)
+    assert not bodies_in_contact(robot.model, robot.data, "right_finger", demo.CUP)
     # Only the gripper linkage has equalities; no weld attaches the cup.
     assert all(int(kind) != int(mujoco.mjtEq.mjEQ_WELD) for kind in robot.model.eq_type)
 
 
 def test_cannot_lift_without_bilateral_contact(robot, monkeypatch):
     monkeypatch.setattr(robot, "bilateral_finger_contact", lambda _: False)
-    with pytest.raises(demo.DemoError, match="无双侧指垫接触"):
+    with pytest.raises(demo.TaskError, match="No bilateral finger contact"):
         demo.run_pick_cup(robot)
     bottom, _ = demo._cup_pose(robot)
     assert bottom[2] < 0.04
@@ -60,10 +48,11 @@ def test_cannot_lift_without_bilateral_contact(robot, monkeypatch):
 def test_lost_contact_during_lift_aborts(robot, monkeypatch):
     actual_contact = robot.bilateral_finger_contact
     monkeypatch.setattr(
-        robot, "bilateral_finger_contact",
+        robot,
+        "bilateral_finger_contact",
         lambda name: actual_contact(name) if robot.grasp_monitor is None else False,
     )
-    with pytest.raises(demo.DemoError, match="夹持中滑脱：双侧接触中断"):
+    with pytest.raises(demo.TaskError, match="bilateral contact lost"):
         demo.run_pick_cup(robot)
     assert robot.grasp_monitor.max_lost_s > demo.MAX_CONTACT_LOSS_S
 
@@ -72,20 +61,25 @@ def test_excess_relative_motion_aborts(robot, monkeypatch):
     monitor = demo.GraspMonitor.start(robot)
     monkeypatch.setattr(robot, "bilateral_finger_contact", lambda _: True)
     monkeypatch.setattr(
-        demo, "_tool_relative_cup",
-        lambda _: (monitor.position + np.array([demo.MAX_GRASP_SHIFT_M + 0.001, 0, 0]), monitor.axis),
+        demo,
+        "_tool_relative_cup",
+        lambda _: (
+            monitor.position + np.array([demo.MAX_GRASP_SHIFT_M + 0.001, 0, 0]),
+            monitor.axis,
+        ),
     )
-    with pytest.raises(demo.DemoError, match="夹持中滑脱：相对位移"):
+    with pytest.raises(demo.TaskError, match="relative shift"):
         monitor.observe(robot)
 
 
 def test_ik_failure_reports_nonzero_exit(monkeypatch, capsys):
     monkeypatch.setattr(
-        demo.CupRobot, "solve_tcp",
+        demo.CupRobot,
+        "solve_tcp",
         lambda self, *args, **kwargs: (self.data.qpos.copy(), False),
     )
     assert demo.main(["--headless"]) == 1
-    assert "逆运动学不收敛" in capsys.readouterr().err
+    assert "IK did not converge" in capsys.readouterr().err
 
 
 def test_waypoint_ik_failure_reports_nonzero_exit(monkeypatch, capsys):
@@ -94,16 +88,16 @@ def test_waypoint_ik_failure_reports_nonzero_exit(monkeypatch, capsys):
 
     monkeypatch.setattr(demo.CupRobot, "move_tcp", failed_waypoint)
     assert demo.main(["--headless"]) == 1
-    assert "逆运动学或轨迹执行失败" in capsys.readouterr().err
+    assert "IK or trajectory execution failed" in capsys.readouterr().err
 
 
 def test_early_viewer_close_reports_nonzero_exit(monkeypatch, capsys):
     def closed(_robot):
-        raise demo.DemoError("可视化窗口提前关闭")
+        raise demo.TaskError("Viewer window was closed")
 
     monkeypatch.setattr(demo.CupRobot, "check_viewer", closed)
     assert demo.main(["--headless"]) == 1
-    assert "可视化窗口提前关闭" in capsys.readouterr().err
+    assert "Viewer window was closed" in capsys.readouterr().err
 
 
 def test_viewer_close_during_a_step_aborts(robot):
@@ -120,7 +114,7 @@ def test_viewer_close_during_a_step_aborts(robot):
 
     robot._viewer = ClosingViewer()
     try:
-        with pytest.raises(demo.DemoError, match="可视化窗口提前关闭"):
+        with pytest.raises(demo.TaskError, match="Viewer window was closed"):
             robot._step()
     finally:
         robot._viewer = None
@@ -134,8 +128,6 @@ def test_headless_mode_has_no_viewer(robot):
 
 
 def test_perception_manual_pose_and_workspace_validation():
-    import perception
-
     est = perception.pose_estimate_from_manual(0.46, -0.07, 140.0)
     assert est.source == "manual"
     assert est.cup_bottom_xy_m == pytest.approx((0.46, -0.07))
@@ -143,13 +135,11 @@ def test_perception_manual_pose_and_workspace_validation():
     assert len(est.mujoco_pos_m) == 3
     assert len(est.mujoco_quat_wxyz) == 4
 
-    with pytest.raises(perception.PerceptionError, match="超出安全净空工作区"):
+    with pytest.raises(perception.PerceptionError, match="outside the workspace"):
         perception.pose_estimate_from_manual(0.45, 0.25, 0.0)
 
 
 def test_perception_detects_sideways_cup_from_synthetic_rgbd(tmp_path):
-    import perception
-
     h, w = 800, 1280
     fx, fy, cx, cy = 612.5, 612.7, 633.2, 399.8
     k_mat = [[fx, 0.0, cx], [0.0, fy, cy], [0.0, 0.0, 1.0]]
@@ -166,8 +156,6 @@ def test_perception_detects_sideways_cup_from_synthetic_rgbd(tmp_path):
         dtype=np.float64,
     )
     handeye_file = tmp_path / "handeye.yaml"
-    import yaml
-
     handeye_file.write_text(
         yaml.safe_dump(
             {
@@ -248,17 +236,13 @@ def test_sim_oblique_cup_pose_pick_and_place(tmp_path):
 
 
 def test_sim2real_safety_gates():
-    import perception
-    import sim2real
-    from ufactory_mujoco.safety import SafetyGateError, enforce_single_cycle
-
     est = perception.pose_estimate_from_manual(0.38, -0.18, 0.0)
     # Automatic target selection must switch to fallback when default overlaps cup
     chosen = sim2real.select_safe_target_xy(est)
     assert np.allclose(chosen, sim2real.FALLBACK_REAL_TARGET_XY)
 
     # Explicit target too close to cup must fail closed
-    with pytest.raises(SafetyGateError, match="距离过近"):
+    with pytest.raises(SafetyGateError, match="too close"):
         sim2real.select_safe_target_xy(est, requested_target_xy=(0.39, -0.17))
 
     # Multi-cycle hardware request must fail closed
@@ -267,8 +251,6 @@ def test_sim2real_safety_gates():
 
 
 def test_config_yaml_headless_and_viewer_defaults(tmp_path, monkeypatch):
-    import yaml
-
     default_cfg = demo.load_config()
     assert default_cfg.get("headless") is False
     assert default_cfg.get("task", {}).get("post_verify") is True
@@ -299,9 +281,6 @@ def test_config_yaml_headless_and_viewer_defaults(tmp_path, monkeypatch):
 
 
 def test_verify_upright_cup_closed_loop(tmp_path):
-    import perception
-    import yaml
-
     h, w = 800, 1280
     fx, fy, cx, cy = 612.5, 612.7, 633.2, 399.8
     k_mat = [[fx, 0.0, cx], [0.0, fy, cy], [0.0, 0.0, 1.0]]
@@ -360,5 +339,3 @@ def test_verify_upright_cup_closed_loop(tmp_path):
         color_bgr, v_ok, dbg, tmp_path / "after_verify.png"
     )
     assert after_img.is_file()
-
-

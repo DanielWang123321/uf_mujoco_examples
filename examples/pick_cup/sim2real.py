@@ -1,10 +1,13 @@
-"""Sim-to-Real digital twin preflight, trajectory verification, and hardware execution for pick_cup."""
+# SPDX-License-Identifier: BSD-3-Clause
+# Copyright (c) 2026, UFACTORY Inc.
+"""Sim-to-Real pipeline for pick_cup: perception, digital-twin preflight, and hardware execution.
+
+Modes: ``dry-run`` (camera + digital twin, no motion), ``sdk-sim`` (xArm controller simulation),
+``real`` (one cycle on hardware, requires ``--confirm-real``).
+"""
 
 from __future__ import annotations
 
-import hashlib
-import json
-import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -12,28 +15,7 @@ from typing import Any
 
 import mujoco
 import numpy as np
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "ufactory_mujoco"))
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-
-from perception import (
-    DEFAULT_HANDEYE_YAML,
-    WORKSPACE_BOUNDS_M,
-    CupPoseEstimate,
-    capture_rgbd_frame,
-    detect_sideways_cup,
-    load_handeye_calibration,
-    pose_estimate_from_manual,
-    save_detection_overlay,
-    save_post_place_overlay,
-    validate_xy_in_workspace,
-    verify_upright_cup,
-)
-from ufactory_mujoco.calibration import (
-    KinematicsCalibration,
-    apply_calibration_to_model,
-    load_kinematics_calibration,
-)
+from ufactory_mujoco.calibration import KinematicsCalibration, load_kinematics_calibration
 from ufactory_mujoco.collision import CollisionChecker
 from ufactory_mujoco.safety import (
     SafetyGateError,
@@ -45,13 +27,23 @@ from ufactory_mujoco.safety import (
 from ufactory_mujoco.trajectory import plan_ptp_quintic
 from ufactory_mujoco.xarm_robot import XArmRobot
 
-DEFAULT_ROBOT_IP = "192.168.1.60"
-DEFAULT_CALIBRATION_YAML = (
-    Path(__file__).resolve().parents[3]
-    / "ufactory_mujoco"
-    / "calibrations"
-    / "xarm6_kinematics_L56A01.yaml"
+from common.paths import DEFAULT_CALIBRATION_YAML, DEFAULT_HANDEYE_YAML, DEFAULT_ROBOT_IP
+from common.sim2real import config_sha256, flange_pose, make_collision_checker, write_json_report
+
+from . import pick_cup as task
+from .perception import (
+    WORKSPACE_BOUNDS_M,
+    CupPoseEstimate,
+    capture_rgbd_frame,
+    detect_sideways_cup,
+    load_handeye_calibration,
+    pose_estimate_from_manual,
+    save_detection_overlay,
+    save_post_place_overlay,
+    validate_xy_in_workspace,
+    verify_upright_cup,
 )
+
 DEFAULT_REAL_TARGET_XY = np.array([0.38, -0.18], dtype=np.float64)
 FALLBACK_REAL_TARGET_XY = np.array([0.38, 0.04], dtype=np.float64)
 MIN_PICK_PLACE_SEPARATION_M = 0.110
@@ -64,7 +56,7 @@ REAL_RELEASE_GAP_MM = 84.0
 
 @dataclass
 class TwinPhaseWaypoints:
-    """Recorded joint waypoints for each manipulation stage from the MuJoCo digital twin."""
+    """Joint waypoints recorded per phase while the digital twin runs the task."""
 
     q_init: np.ndarray
     approach_waypoints: list[np.ndarray] = field(default_factory=list)
@@ -75,7 +67,7 @@ class TwinPhaseWaypoints:
 
 @dataclass(frozen=True)
 class DigitalTwinReport:
-    """Comprehensive verification report produced by the headless MuJoCo digital twin rollout."""
+    """Result of the calibrated MuJoCo digital-twin rollout."""
 
     ok: bool
     cup_pose: CupPoseEstimate
@@ -108,17 +100,8 @@ def make_cup_collision_checker(
     scene_path: str | Path,
     calibration: KinematicsCalibration | None = None,
 ) -> CollisionChecker:
-    """Create a CollisionChecker that checks self-collision and arm/gripper vs table collision."""
-    checker = CollisionChecker(
-        scene_path,
-        safety_margin=0.0,
-        query_margin=0.01,
-        ignore_pairs=[("world", "link_base"), ("world", "link1")],
-        ignore_bodies=("paper_cup",),
-    )
-    if calibration is not None:
-        apply_calibration_to_model(checker.model, calibration, checker.data)
-    return checker
+    """Arm self-collision and arm/gripper-vs-table checker (the cup is ignored)."""
+    return make_collision_checker(scene_path, calibration, ignore_bodies=(task.CUP,))
 
 
 def select_safe_target_xy(
@@ -126,19 +109,19 @@ def select_safe_target_xy(
     requested_target_xy: tuple[float, float] | np.ndarray | None = None,
     bounds: dict[str, float] = WORKSPACE_BOUNDS_M,
 ) -> np.ndarray:
-    """Choose and validate a safe upright placement target XY separated from the initial cup."""
+    """Validate the requested placement target, or pick a default one clear of the cup."""
     cup_mid = np.asarray(cup_pose.cup_center_xy_m, dtype=np.float64)
     cup_bot = np.asarray(cup_pose.cup_bottom_xy_m, dtype=np.float64)
     if requested_target_xy is not None:
         target = np.asarray(requested_target_xy, dtype=np.float64).reshape(2)
-        validate_xy_in_workspace(target, "指定的目标放置位置", bounds)
+        validate_xy_in_workspace(target, "Requested placement target", bounds)
         if (
             np.linalg.norm(target - cup_mid) < MIN_PICK_PLACE_SEPARATION_M
             or np.linalg.norm(target - cup_bot) < MIN_PICK_PLACE_SEPARATION_M
         ):
             raise SafetyGateError(
-                f"目标放置位置 ({target[0]:.3f}, {target[1]:.3f}) m 与纸杯初始位置距离过近 "
-                f"(< {MIN_PICK_PLACE_SEPARATION_M * 1000:.0f} mm)，存在碰撞风险"
+                f"Placement target ({target[0]:.3f}, {target[1]:.3f}) m is too close to the cup "
+                f"(< {MIN_PICK_PLACE_SEPARATION_M * 1000:.0f} mm)"
             )
         return target
 
@@ -147,9 +130,11 @@ def select_safe_target_xy(
             np.linalg.norm(candidate - cup_mid) >= MIN_PICK_PLACE_SEPARATION_M
             and np.linalg.norm(candidate - cup_bot) >= MIN_PICK_PLACE_SEPARATION_M
         ):
-            validate_xy_in_workspace(candidate, "默认目标放置位置", bounds)
+            validate_xy_in_workspace(candidate, "Default placement target", bounds)
             return candidate.copy()
-    raise SafetyGateError("默认候选放置点均与当前纸杯位置重叠，请使用 --target-xy 指定净空目标点")
+    raise SafetyGateError(
+        "All default placement targets overlap the cup; pass a clear one with --target-xy"
+    )
 
 
 def _interpolate_waypoint_chain(
@@ -159,7 +144,12 @@ def _interpolate_waypoint_chain(
     dt: float = 0.02,
     max_vel_rad_s: float = 0.65,
 ) -> np.ndarray:
-    """Convert a phase's waypoint list into a 50 Hz velocity-bounded joint stream (N, 6)."""
+    """Convert recorded waypoints into a 50 Hz velocity-bounded joint stream (N, 6).
+
+    Large moves use a quintic point-to-point profile; dense Cartesian IK waypoints are linearly
+    resampled. (This example keeps this hardware-validated stream instead of
+    ``common.motion.interpolate_waypoint_chain``.)
+    """
     chain: list[np.ndarray] = [np.asarray(q_start, dtype=np.float64).reshape(-1).copy()]
     for q_wp in waypoints:
         q_arr = np.asarray(q_wp, dtype=np.float64).reshape(-1)
@@ -174,12 +164,12 @@ def _interpolate_waypoint_chain(
         q0, q1 = chain[i], chain[i + 1]
         disp = float(np.max(np.abs(q1 - q0)))
         if disp > 0.30:
-            # Point-to-point deploy or return move: smooth quintic profile
+            # Large point-to-point move: quintic profile.
             duration = max(1.5, disp * 1.875 / max_vel_rad_s)
             traj = plan_ptp_quintic(q0, q1, duration=duration, dt=dt)
             seg = traj.q
         else:
-            # Consecutive fine Cartesian IK waypoints
+            # Consecutive fine Cartesian IK waypoints.
             n_sub = max(1, int(np.ceil(disp / (max_vel_rad_s * dt))))
             alphas = np.linspace(0.0, 1.0, n_sub + 1, dtype=np.float64)
             seg = q0[None, :] + alphas[:, None] * (q1 - q0)[None, :]
@@ -193,7 +183,7 @@ def _build_dense_shadow_stream(
     dt: float = 0.02,
     max_vel_rad_s: float = 0.65,
 ) -> np.ndarray:
-    """Concatenate recorded digital twin phases into a continuous trajectory array (N, 6)."""
+    """Concatenate all recorded phases into one continuous joint stream (N, 6)."""
     s1 = _interpolate_waypoint_chain(
         phases.q_init, phases.approach_waypoints, dt=dt, max_vel_rad_s=max_vel_rad_s
     )
@@ -215,12 +205,13 @@ def run_digital_twin_preflight(
     handeye_yaml: str | Path = DEFAULT_HANDEYE_YAML,
     headless: bool = False,
 ) -> DigitalTwinReport:
-    """Execute the full pick, flip, and upright placement in the calibrated MuJoCo digital twin."""
-    import pick_cup as demo
+    """Run the full task in the calibrated digital twin and check the resulting joint stream.
 
+    Checks every stream sample for joint limits, collisions and wrist-camera table clearance.
+    """
     handeye = load_handeye_calibration(handeye_yaml)
     x_flange_cam = np.asarray(handeye["extrinsics"]["X_flange_cam"], dtype=np.float64)
-    checker = make_cup_collision_checker(demo.SCENE, calibration=calibration)
+    checker = make_cup_collision_checker(task.SCENE, calibration=calibration)
 
     q_start = np.asarray(q_init, dtype=np.float64).reshape(6).copy()
     phases = TwinPhaseWaypoints(q_init=q_start)
@@ -229,15 +220,11 @@ def run_digital_twin_preflight(
     min_col_dist_m = float("inf")
     metrics: dict[str, float] = {}
 
-    with demo.CupRobot(viewer=not headless, calibration=calibration) as sim_robot:
-        link6_id = mujoco.mj_name2id(sim_robot.model, mujoco.mjtObj.mjOBJ_BODY, "link6")
+    with task.CupRobot(viewer=not headless, calibration=calibration) as sim_robot:
 
         def update_camera_clearance() -> None:
             nonlocal min_cam_z_m
-            t_flange = np.eye(4, dtype=np.float64)
-            t_flange[:3, :3] = sim_robot.data.xmat[link6_id].reshape(3, 3)
-            t_flange[:3, 3] = sim_robot.data.xpos[link6_id]
-            t_cam = t_flange @ x_flange_cam
+            t_cam = flange_pose(sim_robot.model, sim_robot.data) @ x_flange_cam
             min_cam_z_m = min(min_cam_z_m, float(t_cam[2, 3]) - cup_pose.table_z_m)
 
         orig_step = sim_robot._step
@@ -249,7 +236,7 @@ def run_digital_twin_preflight(
         sim_robot._step = monitored_step  # type: ignore[method-assign]
 
         try:
-            metrics = demo.run_pick_cup(
+            metrics = task.run_pick_cup(
                 sim_robot,
                 cup_pose=cup_pose,
                 target_xy=target_xy_m,
@@ -257,48 +244,40 @@ def run_digital_twin_preflight(
                 recorded_phases=phases,
             )
         except Exception as exc:  # noqa: BLE001
-            failures.append(f"数字孪生仿真预演失败: {exc}")
+            failures.append(f"Digital-twin rollout failed: {exc}")
 
-    # Append final return-to-observation waypoint at the end of retreat_waypoints
+    # Return to the observation pose at the end of the retreat phase.
     if not failures:
         phases.retreat_waypoints.append(q_start.copy())
 
     shadow_stream = _build_dense_shadow_stream(phases)
     max_step_rad = (
-        float(np.max(np.abs(np.diff(shadow_stream, axis=0))))
-        if len(shadow_stream) > 1
-        else 0.0
+        float(np.max(np.abs(np.diff(shadow_stream, axis=0)))) if len(shadow_stream) > 1 else 0.0
     )
 
-    # Check every sample in shadow_stream for joint limits, collision, and camera height
     fk_model = checker.model
     fk_data = mujoco.MjData(fk_model)
-    link6_fk_id = mujoco.mj_name2id(fk_model, mujoco.mjtObj.mjOBJ_BODY, "link6")
     for idx, q_sample in enumerate(shadow_stream):
         if np.any(q_sample < checker.q_lo - 1e-6) or np.any(q_sample > checker.q_hi + 1e-6):
-            failures.append(f"轨迹采样点 #{idx} 超出关节限位")
+            failures.append(f"Stream sample #{idx} exceeds joint limits")
             break
         dist = float(checker.min_distance(q_sample))
         min_col_dist_m = min(min_col_dist_m, dist)
         if checker.in_collision(q_sample):
-            failures.append(f"轨迹采样点 #{idx} 检测到碰撞 (min_dist={dist * 1000:.2f} mm)")
+            failures.append(f"Stream sample #{idx} is in collision (min_dist={dist * 1000:.2f} mm)")
             break
         fk_data.qpos[:6] = q_sample
         mujoco.mj_forward(fk_model, fk_data)
-        t_flange = np.eye(4, dtype=np.float64)
-        t_flange[:3, :3] = fk_data.xmat[link6_fk_id].reshape(3, 3)
-        t_flange[:3, 3] = fk_data.xpos[link6_fk_id]
-        t_cam = t_flange @ x_flange_cam
-        cam_clear = float(t_cam[2, 3]) - cup_pose.table_z_m
-        min_cam_z_m = min(min_cam_z_m, cam_clear)
+        t_cam = flange_pose(fk_model, fk_data) @ x_flange_cam
+        min_cam_z_m = min(min_cam_z_m, float(t_cam[2, 3]) - cup_pose.table_z_m)
 
     if min_cam_z_m < MIN_CAMERA_TABLE_CLEARANCE_M:
         failures.append(
-            f"腕部相机最低离桌高度 {min_cam_z_m * 1000:.1f} mm 低于安全阈值 "
+            f"Wrist camera table clearance {min_cam_z_m * 1000:.1f} mm is below "
             f"{MIN_CAMERA_TABLE_CLEARANCE_M * 1000:.1f} mm"
         )
     if max_step_rad > 0.15:
-        failures.append(f"相邻轨迹步关节角跨度过大 ({max_step_rad:.4f} rad > 0.15 rad)")
+        failures.append(f"Joint step between samples too large ({max_step_rad:.4f} rad > 0.15 rad)")
 
     total_wps = (
         len(phases.approach_waypoints)
@@ -327,13 +306,11 @@ def _stream_waypoints_on_real(
     max_vel_rad_s: float = 0.65,
     dt: float = 0.02,
 ) -> None:
-    """Stream a sequence of joint waypoints smoothly in servo_j mode on the real xArm6."""
+    """Stream joint waypoints to the real xArm in servo_j mode."""
     if not waypoints:
         return
     q_cur = robot.get_joint_positions()
-    stream = _interpolate_waypoint_chain(
-        q_cur, waypoints, dt=dt, max_vel_rad_s=max_vel_rad_s
-    )
+    stream = _interpolate_waypoint_chain(q_cur, waypoints, dt=dt, max_vel_rad_s=max_vel_rad_s)
     for q_cmd in stream[1:]:
         robot.set_joint_positions(q_cmd)
         time.sleep(dt)
@@ -347,6 +324,7 @@ def run_sim2real_pipeline(
     ip: str = DEFAULT_ROBOT_IP,
     calibration_path: str | Path = DEFAULT_CALIBRATION_YAML,
     handeye_path: str | Path = DEFAULT_HANDEYE_YAML,
+    camera_serial: str = "",
     cup_pose_override: tuple[float, float, float] | None = None,
     target_xy_override: tuple[float, float] | None = None,
     headless: bool = False,
@@ -357,11 +335,9 @@ def run_sim2real_pipeline(
     save_after_vis_path: str | Path | None = None,
     report_path: str | Path | None = None,
 ) -> dict[str, Any]:
-    """Run the end-to-end Sim-to-Real pipeline (dry-run, sdk-sim, or real)."""
-    import pick_cup as demo
-
+    """End-to-end pipeline: perceive -> digital-twin preflight -> dry-run / sdk-sim / real."""
     if mode not in ("dry-run", "sdk-sim", "real"):
-        raise ValueError(f"不支持的硬件运行模式: {mode!r}")
+        raise ValueError(f"Unsupported hardware mode: {mode!r}")
     enforce_single_cycle(cycles, mode)
 
     calib = load_kinematics_calibration(calibration_path, robot="xarm6")
@@ -370,29 +346,24 @@ def run_sim2real_pipeline(
         ip,
         robot="xarm6",
         gripper="gripper_g2",
-        model_path=demo.SCENE,
+        model_path=task.SCENE,
         calibration=calib,
         read_only=True,
     ) as robot:
         q_obs = robot.get_joint_positions()
-        link6_id = mujoco.mj_name2id(robot.model, mujoco.mjtObj.mjOBJ_BODY, "link6")
-        t_base_flange = np.eye(4, dtype=np.float64)
-        t_base_flange[:3, :3] = robot.data.xmat[link6_id].reshape(3, 3)
-        t_base_flange[:3, 3] = robot.data.xpos[link6_id]
+        t_base_flange = flange_pose(robot.model, robot.data)
 
-        # Step 1: Acquire cup 3D pose (from Eye-in-Hand Gemini 305 or manual override)
+        # 1. Cup pose from the wrist camera (or a manual override).
         if cup_pose_override is not None:
-            cup_pose = pose_estimate_from_manual(
-                cup_pose_override[0], cup_pose_override[1], cup_pose_override[2]
-            )
+            cup_pose = pose_estimate_from_manual(*cup_pose_override)
             print(
-                f"[感知] 使用手动指定纸杯位姿: 杯底=({cup_pose.cup_bottom_xy_m[0]:.3f}, "
-                f"{cup_pose.cup_bottom_xy_m[1]:.3f}) m, 偏航角={cup_pose.yaw_deg:.1f}°",
+                f"[Perception] Manual cup pose: bottom=({cup_pose.cup_bottom_xy_m[0]:.3f}, "
+                f"{cup_pose.cup_bottom_xy_m[1]:.3f}) m, yaw={cup_pose.yaw_deg:.1f} deg",
                 flush=True,
             )
         else:
-            print("[感知] 正在从 Orbbec Gemini 305 采集对齐 RGB-D 帧并估计纸杯 6D 位姿 ...", flush=True)
-            color_bgr, depth_m, _ = capture_rgbd_frame()
+            print("[Perception] Capturing RGB-D from Orbbec Gemini 305 ...", flush=True)
+            color_bgr, depth_m, _ = capture_rgbd_frame(serial=camera_serial)
             cup_pose, debug_info = detect_sideways_cup(
                 color_bgr,
                 depth_m,
@@ -401,24 +372,23 @@ def run_sim2real_pipeline(
             )
             if save_vis_path is not None:
                 vis_file = save_detection_overlay(color_bgr, cup_pose, debug_info, save_vis_path)
-                print(f"[感知] 已保存视觉检测叠加图: {vis_file}", flush=True)
+                print(f"[Perception] Saved detection overlay: {vis_file}", flush=True)
             print(
-                f"[感知] 识别成功: 杯底=({cup_pose.cup_bottom_xy_m[0]:.3f}, "
-                f"{cup_pose.cup_bottom_xy_m[1]:.3f}) m, 杯口=({cup_pose.cup_top_xy_m[0]:.3f}, "
-                f"{cup_pose.cup_top_xy_m[1]:.3f}) m, 偏航角={cup_pose.yaw_deg:.1f}°, "
-                f"局部桌面 Z={cup_pose.table_z_m * 1000:.1f} mm ({cup_pose.point_count} 点)",
+                f"[Perception] Cup detected: bottom=({cup_pose.cup_bottom_xy_m[0]:.3f}, "
+                f"{cup_pose.cup_bottom_xy_m[1]:.3f}) m, rim=({cup_pose.cup_top_xy_m[0]:.3f}, "
+                f"{cup_pose.cup_top_xy_m[1]:.3f}) m, yaw={cup_pose.yaw_deg:.1f} deg, "
+                f"table Z={cup_pose.table_z_m * 1000:.1f} mm ({cup_pose.point_count} points)",
                 flush=True,
             )
 
         target_xy = select_safe_target_xy(cup_pose, target_xy_override)
-        sim_mode_label = "无头模式" if headless else "3D 可视化窗口"
         print(
-            f"[规划] 目标竖放位置: ({target_xy[0]:.3f}, {target_xy[1]:.3f}) m，"
-            f"开始 MuJoCo 数字孪生预演 ({sim_mode_label}) ...",
+            f"[Plan] Upright target ({target_xy[0]:.3f}, {target_xy[1]:.3f}) m; running the "
+            f"MuJoCo digital twin ({'headless' if headless else 'viewer'}) ...",
             flush=True,
         )
 
-        # Step 2: Run full physics rollout in MuJoCo digital twin (visualized by default)
+        # 2. Full physics rollout in the calibrated digital twin.
         twin_report = run_digital_twin_preflight(
             cup_pose,
             target_xy,
@@ -428,28 +398,25 @@ def run_sim2real_pipeline(
             headless=headless,
         )
         if not twin_report.ok:
-            reason_str = "；".join(twin_report.failures)
-            raise SafetyGateError(f"数字孪生安全预检未通过，已拦截硬件执行：{reason_str}")
+            reason_str = "; ".join(twin_report.failures)
+            raise SafetyGateError(f"Digital-twin preflight failed; hardware blocked: {reason_str}")
 
         print(
-            f"[预演] 数字孪生验证通过: 模拟放置误差={twin_report.metrics['error_mm']:.2f} mm, "
-            f"倾角={twin_report.metrics['tilt_deg']:.2f}°, "
-            f"相机最低离桌={twin_report.min_camera_z_mm:.1f} mm, "
-            f"最小防撞间距={twin_report.min_collision_dist_mm:.1f} mm",
+            f"[Preflight] Passed: placement error={twin_report.metrics['error_mm']:.2f} mm, "
+            f"tilt={twin_report.metrics['tilt_deg']:.2f} deg, "
+            f"min camera clearance={twin_report.min_camera_z_mm:.1f} mm, "
+            f"min collision distance={twin_report.min_collision_dist_mm:.1f} mm",
             flush=True,
         )
 
         prog_hash = stream_sha256(twin_report.shadow_stream_rad)
-        cfg_hash = hashlib.sha256(
-            json.dumps(
-                {
-                    "cup_pose": cup_pose.as_dict(),
-                    "target_xy": target_xy.tolist(),
-                    "calibration_sha256": calib.sha256,
-                },
-                sort_keys=True,
-            ).encode("utf-8")
-        ).hexdigest()
+        cfg_hash = config_sha256(
+            {
+                "cup_pose": cup_pose.as_dict(),
+                "target_xy": target_xy.tolist(),
+                "calibration_sha256": calib.sha256,
+            }
+        )
 
         result_payload: dict[str, Any] = {
             "mode": mode,
@@ -466,12 +433,14 @@ def run_sim2real_pipeline(
         }
 
         if mode == "dry-run":
-            _write_json_report(report_path, result_payload)
+            write_json_report(report_path, result_payload)
             return result_payload
 
-        checker = make_cup_collision_checker(demo.SCENE, calibration=calib)
+        checker = make_cup_collision_checker(task.SCENE, calibration=calib)
         if mode == "sdk-sim":
-            print("[SDK-Sim] 正在控制器内部仿真重放轨迹（物理关节保持静止）...", flush=True)
+            print(
+                "[SDK-Sim] Replaying in the controller simulation (arm stays still) ...", flush=True
+            )
             evidence = run_sdk_simulation(
                 robot._arm,
                 robot="xarm6",
@@ -488,18 +457,18 @@ def run_sim2real_pipeline(
             result_payload["sdk_sim"] = evidence.as_dict()
             result_payload["ok"] = ok
             result_payload["success"] = ok
-            _write_json_report(report_path, result_payload)
+            write_json_report(report_path, result_payload)
             if not ok:
-                raise SafetyGateError(f"sdk-sim 校验未通过: {evidence.failures}")
+                raise SafetyGateError(f"sdk-sim check failed: {evidence.failures}")
             print(
-                f"[SDK-Sim] 验证通过: 采样点={evidence.samples}, "
-                f"最大关节误差={evidence.max_joint_error_rad * 1000:.3f} mrad, "
-                f"物理关节漂移={evidence.physical_joint_drift_rad * 1000:.4f} mrad",
+                f"[SDK-Sim] Passed: samples={evidence.samples}, "
+                f"max joint error={evidence.max_joint_error_rad * 1000:.3f} mrad, "
+                f"physical drift={evidence.physical_joint_drift_rad * 1000:.4f} mrad",
                 flush=True,
             )
             return result_payload
 
-        # Step 3: Real hardware execution (requires --confirm-real and MotionApproval)
+        # 3. Real hardware (requires --confirm-real; approval is valid for one cycle).
         approval = authorize_real_motion(
             robot._arm,
             robot="xarm6",
@@ -511,9 +480,9 @@ def run_sim2real_pipeline(
             program_sha256=prog_hash,
         )
         robot.unlock_motion(approval)
-        print("[Real] 安全门已解锁 (单周期 MotionApproval)，开始真机执行 ...", flush=True)
+        print("[Real] Motion unlocked for one cycle", flush=True)
 
-        print("  1/5 张开 Gripper G2 并移动至侧卧纸杯抓取位姿 ...", flush=True)
+        print("  1/5 Open the gripper and move to the grasp pose ...", flush=True)
         robot.set_gripper_gap(
             REAL_RELEASE_GAP_MM / 1000.0,
             speed_percent=50.0,
@@ -523,8 +492,8 @@ def run_sim2real_pipeline(
 
         grasp_gap_mm = float(np.clip(twin_report.phases.grasp_gap_mm, 50.0, 55.0))
         print(
-            f"  2/5 柔顺闭合 Gripper G2 (目标间隙={grasp_gap_mm:.1f} mm, "
-            f"速度={REAL_GRASP_SPEED_PCT:.0f}%, 力控={REAL_GRASP_FORCE_PCT:.0f}%) ...",
+            f"  2/5 Close the gripper (target gap={grasp_gap_mm:.1f} mm, "
+            f"speed={REAL_GRASP_SPEED_PCT:.0f}%, force={REAL_GRASP_FORCE_PCT:.0f}%) ...",
             flush=True,
         )
         robot.set_gripper_gap(
@@ -535,11 +504,11 @@ def run_sim2real_pipeline(
         time.sleep(0.5)
         measured_grasp_gap_mm = robot.get_gripper_gap() * 1000.0
 
-        print("  3/5 抬起纸杯、空中翻转 90° 并搬运至竖放目标位置 ...", flush=True)
+        print("  3/5 Lift, flip 90 deg, and carry to the target ...", flush=True)
         _stream_waypoints_on_real(robot, twin_report.phases.lift_flip_place_waypoints)
         time.sleep(0.3)
 
-        print("  4/5 缓速张开 Gripper G2 释放竖直纸杯 ...", flush=True)
+        print("  4/5 Release the cup slowly ...", flush=True)
         robot.set_gripper_gap(
             REAL_RELEASE_GAP_MM / 1000.0,
             speed_percent=15.0,
@@ -547,19 +516,17 @@ def run_sim2real_pipeline(
         )
         time.sleep(0.5)
 
-        print("  5/5 沿夹爪轴向安全退刀并回到观测位姿 ...", flush=True)
+        print("  5/5 Retreat and return to the observation pose ...", flush=True)
         _stream_waypoints_on_real(robot, twin_report.phases.retreat_waypoints)
 
         q_final = robot.get_joint_positions()
         final_err_rad = float(np.max(np.abs(q_final - q_obs)))
-        t_base_flange_after = np.eye(4, dtype=np.float64)
-        t_base_flange_after[:3, :3] = robot.data.xmat[link6_id].reshape(3, 3)
-        t_base_flange_after[:3, 3] = robot.data.xpos[link6_id]
+        t_base_flange_after = flange_pose(robot.model, robot.data)
 
         post_ok = True
         if post_verify:
-            print("[闭环确认] 正在从 Orbbec Gemini 305 拍照确认竖直纸杯放置状态 ...", flush=True)
-            after_bgr, after_depth, _ = capture_rgbd_frame()
+            print("[Verify] Capturing RGB-D to verify the upright cup ...", flush=True)
+            after_bgr, after_depth, _ = capture_rgbd_frame(serial=camera_serial)
             post_check, after_debug = verify_upright_cup(
                 after_bgr,
                 after_depth,
@@ -572,14 +539,14 @@ def run_sim2real_pipeline(
                 after_file = save_post_place_overlay(
                     after_bgr, post_check, after_debug, save_after_vis_path
                 )
-                print(f"[闭环确认] 已保存放置后验证图像: {after_file}", flush=True)
+                print(f"[Verify] Saved verification overlay: {after_file}", flush=True)
             result_payload["post_place_verification"] = post_check.as_dict()
             post_ok = bool(post_check.ok)
-            status_tag = "通过" if post_ok else f"未通过 ({post_check.reason})"
+            status_tag = "PASS" if post_ok else f"FAIL ({post_check.reason})"
             print(
-                f"[闭环确认] 视觉复核{status_tag}: 实测位置=({post_check.measured_xy_m[0]:.3f}, "
-                f"{post_check.measured_xy_m[1]:.3f}) m, 水平偏差={post_check.xy_error_mm:.1f} mm, "
-                f"杯口高度={post_check.rim_height_mm:.1f} mm, 纸杯像素={post_check.roi_cup_pixels}",
+                f"[Verify] {status_tag}: measured=({post_check.measured_xy_m[0]:.3f}, "
+                f"{post_check.measured_xy_m[1]:.3f}) m, XY error={post_check.xy_error_mm:.1f} mm, "
+                f"rim height={post_check.rim_height_mm:.1f} mm, cup pixels={post_check.roi_cup_pixels}",
                 flush=True,
             )
 
@@ -592,22 +559,14 @@ def run_sim2real_pipeline(
             ok=overall_ok,
             success=overall_ok,
         )
-        _write_json_report(report_path, result_payload)
+        write_json_report(report_path, result_payload)
         if not post_ok:
             raise SafetyGateError(
-                f"放置后相机闭环确认未通过: {result_payload['post_place_verification']['reason']}"
+                f"Post-place verification failed: {result_payload['post_place_verification']['reason']}"
             )
         print(
-            f"[Real] 真机单周期执行与视觉闭环确认完成: 夹持实测开度={measured_grasp_gap_mm:.1f} mm, "
-            f"回位关节误差={final_err_rad * 1000:.2f} mrad",
+            f"[Real] Cycle complete: measured grasp gap={measured_grasp_gap_mm:.1f} mm, "
+            f"return joint error={final_err_rad * 1000:.2f} mrad",
             flush=True,
         )
         return result_payload
-
-
-def _write_json_report(report_path: str | Path | None, payload: dict[str, Any]) -> None:
-    if not report_path:
-        return
-    path = Path(report_path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")

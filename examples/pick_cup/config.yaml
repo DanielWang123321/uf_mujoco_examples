@@ -1,16 +1,16 @@
-# 一次性纸杯夹取与竖放 (MuJoCo 仿真 & Sim-to-Real) 配置文件
-mode: sim
-headless: false  # false: 默认弹出 MuJoCo 3D 可视化窗口预演；true: 无头模式后台运行
+# pick_cup configuration. Priority: command-line flag > this file > built-in default.
+mode: sim         # sim (MuJoCo only) | dry-run | sdk-sim | real
+headless: false   # true: run the simulation / digital twin without the viewer
 
 robot:
   ip: "192.168.1.60"
-  calibration: "../ufactory_mujoco/calibrations/xarm6_kinematics_L56A01.yaml"
+  calibration: "calibration/xarm6_kinematics.yaml"   # see calibration/README.md
 
 camera:
-  handeye: "../camera_tool/result/eye_in_hand.yaml"
+  handeye: "calibration/eye_in_hand.yaml"           # see calibration/README.md
+  serial: ""        # Orbbec serial number; empty: first camera found
 
 task:
-  post_verify: true  # 真机完成竖放回到观测位后，自动通过 Gemini 305 拍照进行闭环确认
+  post_verify: true   # after a real run, re-capture the scene and verify the upright cup
   save_vis: "build/pick_cup/real_detection.png"
   save_after_vis: "build/pick_cup/real_after_place.png"
-

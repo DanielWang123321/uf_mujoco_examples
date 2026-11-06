@@ -1,30 +1,31 @@
-uf_mujoco_examples — third-party notices
+uf_mujoco_examples - third-party notices
 ========================================
 
-The Python code, task controllers, perception pipelines, and procedural object
-generators (paper cup, M12 screw, and hex flange nut) in this repository are
-licensed under the MIT License (see LICENSE).
+The code, scenes, and procedurally generated object models (paper cup, M12 screw, hex flange
+nut) in this repository are licensed under the BSD 3-Clause License (see LICENSE).
 
-The Gripper G2 meshes under assets/gripper_g2/ and the upstream robot models
-referenced from ufactory_mujoco are derived from upstream UFACTORY packages and
-are subject to their respective open-source licenses:
+The following third-party material is used or referenced:
 
-1. ufactory_mujoco — https://github.com/DanielWang123321/ufactory_mujoco
+1. ufactory_mujoco - https://github.com/DanielWang123321/ufactory_mujoco
    License: MIT AND BSD-3-Clause
-   Used for: xArm 6 + Gripper G2 MJCF kinematics, dynamics, inverse kinematics,
-   collision checking, trajectory planning, and Sim-to-Real safety gates.
+   Used as a sibling checkout (not redistributed here): xArm 6 + Gripper G2 MJCF models and
+   meshes (referenced through symlinks in examples/*/assets/), kinematic calibration,
+   inverse kinematics, collision checking, trajectory planning, and Sim-to-Real safety gates.
 
-2. ufactory_genesis — https://github.com/xArm-Developer/ufactory_genesis
+2. ufactory_genesis - https://github.com/xArm-Developer/ufactory_genesis
    License: MIT (Copyright (c) 2026 Daniel Wang)
-   Used for: High-resolution Gripper G2 GLB visual meshes converted to
-   double-sided smooth-normal OBJ files under assets/gripper_g2/visual/.
+   Used for: Gripper G2 visual meshes, converted to OBJ files in assets/gripper_g2/visual/.
 
-3. xarm_ros / xarm_ros2 — https://github.com/xArm-Developer/xarm_ros
-   License: BSD-3-Clause (Copyright (c) 2018, UFACTORY Inc. All rights reserved.)
-   Used for: Gripper G2 collision STL geometries under assets/gripper_g2/collision/
-   and robot kinematic/inertial parameters.
+3. xarm_ros - https://github.com/xArm-Developer/xarm_ros
+   License: BSD-3-Clause (Copyright (c) 2018, UFACTORY Inc.)
+   Used for: Gripper G2 collision meshes in assets/gripper_g2/collision/.
 
-Trademarks: xArm, Gripper G2, UF850, Lite 6, and UFACTORY are trademarks of
-UFACTORY. Orbbec and Gemini are trademarks of Orbbec Inc. Their use here
-describes hardware compatibility only.
+4. camera_tool - https://github.com/DanielWang123321/camera_tool
+   License: MIT (Copyright (c) 2026 UFACTORY Camera Calibration Contributors)
+   Used for: reference for the Orbbec capture code in common/camera.py.
 
+Runtime dependencies (installed separately, not redistributed): MuJoCo (Apache-2.0),
+NumPy, SciPy, OpenCV, PyYAML, xArm-Python-SDK (BSD-3-Clause), and pyorbbecsdk (Apache-2.0).
+
+Trademarks: xArm, Gripper G2, and UFACTORY are trademarks of UFACTORY. Orbbec and Gemini are
+trademarks of Orbbec Inc. They are used here to describe hardware compatibility only.

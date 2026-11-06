@@ -1,67 +1,51 @@
-# 01 — Disposable Paper Cup Pick & Upright Place (Simulation & Sim-to-Real)
+# pick_cup — pick, flip, and place a paper cup upright
 
 [English](README.md) | [中文](README_zh.md)
 
-MuJoCo simulation and closed-loop Sim-to-Real example for **UFACTORY xArm 6 + Gripper G2 + Orbbec Gemini 305 (Eye-in-Hand)**: picks up a sideways disposable paper cup (`5.74 g` mass, `53 mm` bottom diameter, `75 mm` top diameter, `88 mm` height), flips it `90°` in mid-air, and places it upright on the tabletop with the bottom down and mouth facing up.
+A disposable paper cup (5.74 g, Ø53 mm bottom, Ø75 mm rim, 88 mm tall) lies on its side. The robot grasps it, flips it 90° in the air, and places it upright at a target point.
 
-## Configuration (`config.yaml`)
-
-Default configuration is located at `examples/pick_cup/config.yaml`:
-
-```yaml
-mode: sim
-headless: false  # false: open 3D MuJoCo viewer; true: run offscreen
-
-robot:
-  ip: "192.168.1.60"
-  calibration: "../ufactory_mujoco/calibrations/xarm6_kinematics_L56A01.yaml"
-
-camera:
-  handeye: "../camera_tool/result/eye_in_hand.yaml"
-
-task:
-  post_verify: true  # Capture a post-place RGB-D frame from observation pose for closed-loop verification
-  save_vis: "build/pick_cup/real_detection.png"
-  save_after_vis: "build/pick_cup/real_after_place.png"
-```
-
-## Quick Start Commands
-
-Run from the repository root:
+## Run
 
 ```bash
-# 1. Pure MuJoCo simulation (opens 3D interactive viewer by default)
-python -m examples.pick_cup.run --mode sim
-python -m examples.pick_cup.run --mode sim --headless
+python -m examples.pick_cup                                   # simulation with viewer
+python -m examples.pick_cup --headless
+python -m examples.pick_cup --cup-pose 0.46 -0.07 140 --target-xy 0.38 -0.18
 
-# 2. Sim-to-Real Stage 1: Real perception + MuJoCo digital-twin preflight (zero hardware motion)
-python -m examples.pick_cup.run --mode dry-run --report build/pick_cup/dry_run.json
-
-# 3. Sim-to-Real Stage 2: xArm controller internal simulation (mode=4, state=5; physical arm stationary)
-python -m examples.pick_cup.run --mode sdk-sim --report build/pick_cup/sdk_sim.json
-
-# 4. Sim-to-Real Stage 3: Gemini 305 perception -> digital-twin preflight -> physical execution -> post-place verification
-python -m examples.pick_cup.run --mode real --confirm-real --report build/pick_cup/real.json
-
-# Optional: Manually specify sideways cup pose (X_M Y_M YAW_DEG, bypassing camera perception)
-python -m examples.pick_cup.run --mode dry-run --cup-pose 0.44 -0.05 135.0
+python -m examples.pick_cup --mode dry-run                    # camera + digital twin, no motion
+python -m examples.pick_cup --mode sdk-sim                    # controller simulation, no motion
+python -m examples.pick_cup --mode real --confirm-real        # hardware
 ```
 
-## Architecture & Control Details
+| Option | Meaning |
+| :--- | :--- |
+| `--cup-pose X Y YAW_DEG` | Cup bottom position (m) and bottom→rim yaw. In hardware modes it replaces camera detection. |
+| `--target-xy X Y` | Upright placement point (m). Sim default `(0.30, 0.15)`; hardware default `(0.38, -0.18)`, falling back to `(0.38, 0.04)` if it is within 110 mm of the cup. |
 
-- **Hollow Paper Cup Asset** (`assets/cup/generate_paper_cup.py`):
-  - Generates a 1:1 visual mesh (`paper_cup.obj`) and hollow collision geometry (bottom cylinder `0.001180 kg` + 24 tilted frustum wall boxes `24 × 0.000190 kg`, total mass `0.00574 kg`).
-- **Eye-in-Hand Perception & Post-Place Verification** (`examples/pick_cup/perception.py`):
-  - Captures aligned RGB-D frames from the Orbbec Gemini 305 and deprojects points into the robot base frame using the Eye-in-Hand calibration YAML.
-  - Segments the white paper cup within the safe workspace (`x ∈ [0.20, 0.60] m, y ∈ [-0.26, 0.12] m`), estimates the 2D PCA principal axis, disambiguates the narrow bottom (`53 mm`) from the wide rim (`75 mm`), and computes the grasp center `40 mm` from the cup base.
-  - After physical placement, automatically captures a second RGB-D frame (`verify_upright_cup`) to verify horizontal placement error, rim height, and upright stability.
-- **Digital-Twin Preflight & Safety Gate** (`examples/pick_cup/sim2real.py`):
-  - Rehearses the entire trajectory inside a calibrated MuJoCo digital twin before streaming any command to the controller.
-  - Enforces minimum collision clearance `>= 5 mm`, wrist-camera tabletop clearance `>= 95 mm`, joint step `<= 0.08 rad`, and 1.0 s unassisted upright stability.
-  - Uses compliant Gripper G2 force control (`55 mm` target opening, `20%` speed, `15%` force) to hold the thin-wall cup without crushing it.
+Shared options (`--mode`, `--headless`, `--ip`, `--calibration`, `--handeye`, `--camera-serial`, `--post-verify`, `--save-vis`, `--save-after-vis`, `--report`) and their defaults are in [`config.yaml`](config.yaml).
 
-## Running Tests
+## How it works
 
-```bash
-pytest examples/pick_cup/test_pick_cup.py -v
-```
+**Simulation** (`pick_cup.py`)
+
+1. Grasp 40 mm from the cup bottom with the gripper vertical; close to 53 mm, back off 1 mm, then keep ~2 N contact force with a 20 Hz feedback loop.
+2. Lift, flip the cup axis to vertical, carry it while correcting with the live cup position, and lower it until the bottom touches the table.
+3. Release, retreat, and require 1 s of free standing (tilt ≤ 10°, placement error ≤ 30 mm, drift ≤ 2 mm).
+
+During the grasp the task aborts if bilateral finger contact is lost for > 0.10 s or the cup moves > 25 mm / 25° relative to the TCP.
+
+**Sim-to-Real** (`sim2real.py`, `perception.py`)
+
+1. Read the joint state and capture one RGB-D frame. The cup is segmented (white pixels + depth above the table); its axis comes from PCA and the bottom/rim ends from width and height.
+2. Run the task in the calibrated digital twin and record the joint waypoints. Every sample of the resulting 50 Hz stream is checked for joint limits, collisions, wrist-camera height ≥ 95 mm above the table, and joint step ≤ 0.15 rad.
+3. `sdk-sim` replays the stream in the controller's simulation mode; `real` streams it to the arm (grasp gap 50–55 mm, 20 % speed, 15 % force).
+4. After returning to the observation pose, a second frame verifies the result (≥ 1200 cup pixels, XY error ≤ 45 mm, rim height ≥ 45 mm).
+
+## Files
+
+| File | Content |
+| :--- | :--- |
+| `pick_cup.py` | `CupRobot`, `run_pick_cup`, CLI |
+| `perception.py` | `detect_sideways_cup`, `verify_upright_cup`, overlays |
+| `sim2real.py` | digital-twin preflight, sdk-sim, real execution |
+| `scene.xml` | xArm 6 + G2, table, paper cup |
+| `test_pick_cup.py` | `pytest examples/pick_cup` |
