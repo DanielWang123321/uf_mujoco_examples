@@ -22,6 +22,7 @@ from common.vision import (
     deproject_pixels_to_cam,
     load_handeye_calibration,
     project_cam_to_pixels,
+    resolve_camera_config,
     validate_xy_in_workspace,
 )
 
@@ -179,7 +180,7 @@ def _foreground_mask_against_green_mat(color_bgr: np.ndarray) -> np.ndarray:
 
 
 def _estimate_hex_yaw_deg(xy_centered: np.ndarray) -> float:
-    """Estimate hex flat yaw angle in [-30, +30) deg using 6-fold angular harmonic on outer rim points."""
+    """Estimate hex flat yaw angle in [-30, +30) deg from 360-deg rim points."""
     if len(xy_centered) < 12:
         return 0.0
     radii = np.hypot(xy_centered[:, 0], xy_centered[:, 1])
@@ -187,10 +188,27 @@ def _estimate_hex_yaw_deg(xy_centered: np.ndarray) -> float:
     rim_mask = (radii >= 0.0062) & (radii <= 0.0115)
     pts = xy_centered[rim_mask] if int(np.count_nonzero(rim_mask)) >= 12 else xy_centered
     angles = np.arctan2(pts[:, 1], pts[:, 0])
-    # For a regular hexagon, vertices are at yaw + 30 deg + k*60 deg (larger radius),
-    # while flats are at yaw + k*60 deg. Weighting by radius aligns 6*theta with vertices.
-    weights = np.hypot(pts[:, 0], pts[:, 1])
-    z6 = np.sum(weights * np.exp(1j * 6.0 * angles))
+    # Guard against one-sided stereo-IR specular dropout crescents on mirror-chrome nuts:
+    # require coverage across at least 9 of 12 30-deg sectors around the bore.
+    sectors_12 = np.floor(((angles + math.pi) / (2.0 * math.pi)) * 12.0).astype(np.int32) % 12
+    if int(np.count_nonzero(np.bincount(sectors_12, minlength=12) >= 2)) < 9:
+        return 0.0
+
+    # Equalize angular density across 36 10-deg bins so uneven sampling does not pull 6*theta.
+    bins_36 = np.floor(((angles + math.pi) / (2.0 * math.pi)) * 36.0).astype(np.int32) % 36
+    pts_r = np.hypot(pts[:, 0], pts[:, 1])
+    bin_angles: list[float] = []
+    bin_radii: list[float] = []
+    for b in range(36):
+        in_bin = bins_36 == b
+        if np.any(in_bin):
+            bin_angles.append(-math.pi + (b + 0.5) * (2.0 * math.pi / 36.0))
+            bin_radii.append(float(np.percentile(pts_r[in_bin], 90.0)))
+    if len(bin_radii) < 18:
+        return 0.0
+    arr_ang = np.asarray(bin_angles, dtype=np.float64)
+    arr_r = np.asarray(bin_radii, dtype=np.float64)
+    z6 = np.sum(arr_r * np.exp(1j * 6.0 * arr_ang))
     if abs(z6) < 1e-9:
         return 0.0
     vertex_angle_rad = float(np.angle(z6)) / 6.0
@@ -198,6 +216,158 @@ def _estimate_hex_yaw_deg(xy_centered: np.ndarray) -> float:
     if flat_yaw_deg >= 30.0:
         flat_yaw_deg -= 60.0
     return round(flat_yaw_deg, 2)
+
+
+def _estimate_hex_yaw_from_rgb(
+    color_bgr: np.ndarray,
+    center_xy: np.ndarray,
+    local_table_z: float,
+    t_base_cam: np.ndarray,
+    cam_cfg: dict[str, Any],
+) -> float | None:
+    """Estimate hex flat normal yaw in [-30, +30) deg from 2D Sobel gradients on the upper hex rim."""
+    h, w = color_bgr.shape[:2]
+    t_cam_base = np.linalg.inv(t_base_cam)
+    cx, cy = float(center_xy[0]), float(center_xy[1])
+    z_hex = float(local_table_z) + 0.0095
+
+    step_m = 0.010
+    ref_base = np.array(
+        [[cx, cy, z_hex], [cx + step_m, cy, z_hex], [cx, cy + step_m, z_hex]],
+        dtype=np.float64,
+    )
+    uv_ref = project_cam_to_pixels(ref_base @ t_cam_base[:3, :3].T + t_cam_base[:3, 3], cam_cfg)
+    if not np.all(np.isfinite(uv_ref)):
+        return None
+    jac_uv_xy = np.column_stack(
+        [(uv_ref[1] - uv_ref[0]) / step_m, (uv_ref[2] - uv_ref[0]) / step_m]
+    )
+
+    grid_1d = np.linspace(-0.0125, 0.0125, 81)
+    gx_m, gy_m = np.meshgrid(grid_1d, grid_1d)
+    r_m = np.hypot(gx_m, gy_m)
+    ring = (r_m >= 0.0085) & (r_m <= 0.0120)
+    pts_base = np.column_stack(
+        [cx + gx_m[ring], cy + gy_m[ring], np.full(int(np.count_nonzero(ring)), z_hex)]
+    )
+    uv = project_cam_to_pixels(pts_base @ t_cam_base[:3, :3].T + t_cam_base[:3, 3], cam_cfg)
+    if not np.all(np.isfinite(uv)):
+        return None
+    ui = np.round(uv[:, 0]).astype(np.int32)
+    vi = np.round(uv[:, 1]).astype(np.int32)
+    inside = (ui >= 2) & (ui < w - 2) & (vi >= 2) & (vi < h - 2)
+    if int(np.count_nonzero(inside)) < 120:
+        return None
+    ui, vi = ui[inside], vi[inside]
+
+    gray = cv2.cvtColor(color_bgr, cv2.COLOR_BGR2GRAY).astype(np.float32)
+    sobel_x = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3)
+    sobel_y = cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=3)
+    grad_uv = np.column_stack([sobel_x[vi, ui], sobel_y[vi, ui]])
+    if float(np.mean(np.hypot(grad_uv[:, 0], grad_uv[:, 1]))) < 12.0:
+        return None
+
+    grad_xy = grad_uv @ jac_uv_xy
+    mag = np.hypot(grad_xy[:, 0], grad_xy[:, 1])
+    weights = mag**1.5
+    w_sum = float(np.sum(weights))
+    if w_sum <= 1e-6:
+        return None
+    ang = np.arctan2(grad_xy[:, 1], grad_xy[:, 0])
+    z6 = np.sum(weights * np.exp(1j * 6.0 * ang))
+    if abs(z6) / w_sum < 0.06:
+        return None
+
+    flat_yaw_deg = (math.degrees(float(np.angle(z6))) / 6.0) % 60.0
+    if flat_yaw_deg >= 30.0:
+        flat_yaw_deg -= 60.0
+    return round(flat_yaw_deg, 2)
+
+
+def _refine_circular_silhouette_xy(
+    fg_mask: np.ndarray,
+    fov_mask: np.ndarray,
+    seed_px: np.ndarray,
+    *,
+    plane_z_m: float,
+    t_base_cam: np.ndarray,
+    cam_cfg: dict[str, Any],
+    ref_xy_m: np.ndarray,
+    diam_range_mm: tuple[float, float] = (21.0, 38.0),
+    max_shift_m: float = 0.012,
+) -> tuple[np.ndarray, float] | None:
+    """Intersect the hole-filled 2D outer flange contour centroid ray with horizontal plane_z_m.
+
+    Mirror-chrome flange nuts cause asymmetric stereo-IR glare dropout on one side of the hex body,
+    biasing raw 3D point medians by several millimeters. Because the 29 mm circular bottom flange
+    forms a complete 2D silhouette against the matte green mat, its hole-filled outer contour
+    recovers the coaxial nut center without losing 3D presence/height safety gates.
+    """
+    if len(seed_px) < 25:
+        return None
+    active_fg = (fg_mask & fov_mask).astype(np.uint8)
+    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(active_fg, connectivity=8)
+    if num_labels <= 1:
+        return None
+
+    seed_labels = labels[seed_px[:, 1], seed_px[:, 0]]
+    seed_labels = seed_labels[seed_labels > 0]
+    if len(seed_labels) < 25:
+        return None
+    counts = np.bincount(seed_labels)
+    best_label = int(np.argmax(counts))
+    if int(counts[best_label]) < 25:
+        return None
+
+    fy_idx, fx_idx = np.nonzero(fov_mask)
+    if len(fx_idx) == 0:
+        return None
+    x0, y0, bw, bh, _ = (int(v) for v in stats[best_label])
+    if (
+        x0 <= int(fx_idx.min()) + 1
+        or y0 <= int(fy_idx.min()) + 1
+        or x0 + bw >= int(fx_idx.max())
+        or y0 + bh >= int(fy_idx.max())
+    ):
+        return None
+
+    comp_u8 = (labels == best_label).astype(np.uint8)
+    contours, _ = cv2.findContours(comp_u8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+    if not contours:
+        return None
+    cnt = max(contours, key=cv2.contourArea)
+    moments = cv2.moments(cnt)
+    area_px = float(moments["m00"])
+    if area_px < 120.0:
+        return None
+    _, (rect_w, rect_h), _ = cv2.minAreaRect(cnt)
+    if max(rect_w, rect_h) <= 1e-6 or (min(rect_w, rect_h) / max(rect_w, rect_h)) < 0.72:
+        return None
+
+    u_c = float(moments["m10"] / area_px)
+    v_c = float(moments["m01"] / area_px)
+    r_px = math.sqrt(area_px / math.pi)
+    sample_px = np.array([[u_c, v_c], [u_c + r_px, v_c], [u_c, v_c + r_px]], dtype=np.float64)
+    rays_cam = deproject_pixels_to_cam(sample_px, np.ones(3, dtype=np.float64), cam_cfg)
+    o_base = t_base_cam[:3, 3]
+    dirs_base = rays_cam @ t_base_cam[:3, :3].T
+    if np.any(np.abs(dirs_base[:, 2]) < 0.25):
+        return None
+    scales = (float(plane_z_m) - float(o_base[2])) / dirs_base[:, 2]
+    if np.any(scales <= 0.05):
+        return None
+
+    pts_plane = o_base[:2] + scales[:, None] * dirs_base[:, :2]
+    xy_2d = pts_plane[0]
+    r_est_m = 0.5 * (
+        float(np.linalg.norm(pts_plane[1] - xy_2d)) + float(np.linalg.norm(pts_plane[2] - xy_2d))
+    )
+    diam_mm = 2.0 * r_est_m * 1000.0
+    if not (diam_range_mm[0] <= diam_mm <= diam_range_mm[1]):
+        return None
+    if float(np.linalg.norm(xy_2d - ref_xy_m)) > float(max_shift_m):
+        return None
+    return xy_2d, diam_mm
 
 
 def detect_nut_near(
@@ -210,11 +380,12 @@ def detect_nut_near(
     exclude_xy_m: tuple[float, float] | np.ndarray | None = None,
     exclude_radius_m: float = 0.042,
     handeye_yaml: str | Path = DEFAULT_HANDEYE_YAML,
+    camera_metadata: dict[str, Any] | None = None,
     workspace_bounds: dict[str, float] = WORKSPACE_BOUNDS_M,
 ) -> tuple[NutPoseEstimate | None, dict[str, Any]]:
     """Detect and refine the hex flange nut pose near expected_xy_m in look-down RGB-D view."""
     handeye = load_handeye_calibration(handeye_yaml)
-    cam_cfg = handeye["camera"]
+    cam_cfg = resolve_camera_config(handeye, color_bgr, depth_m, camera_metadata)
     x_flange_cam = np.asarray(handeye["extrinsics"]["X_flange_cam"], dtype=np.float64)
     t_base_cam = np.asarray(t_base_flange, dtype=np.float64).reshape(4, 4) @ x_flange_cam
     exp_xy = np.asarray(expected_xy_m, dtype=np.float64).reshape(2)
@@ -228,7 +399,14 @@ def detect_nut_near(
     h, w = depth_m.shape
     ys, xs = np.mgrid[0:h, 0:w]
     fov_mask = (
-        (ys >= int(0.06 * h)) & (ys < int(0.88 * h)) & (xs >= int(0.06 * w)) & (xs < int(0.94 * w))
+        np.ones((h, w), dtype=bool)
+        if cam_cfg.get("type") == "realsense"
+        else (
+            (ys >= int(0.06 * h))
+            & (ys < int(0.88 * h))
+            & (xs >= int(0.06 * w))
+            & (xs < int(0.94 * w))
+        )
     )
     valid_d = np.isfinite(depth_m) & (depth_m > 0.07) & (depth_m < 0.72) & fov_mask
     if int(np.count_nonzero(valid_d)) < 200:
@@ -265,6 +443,7 @@ def detect_nut_near(
         cand_mask &= np.linalg.norm(pts_base[:, :2] - excl_xy, axis=1) > float(exclude_radius_m)
 
     cand_pts = pts_base[cand_mask]
+    cand_px = px_all[cand_mask]
     if len(cand_pts) < 60:
         return None, {
             "t_base_cam": t_base_cam,
@@ -279,6 +458,7 @@ def detect_nut_near(
     rough_xy = np.median(seed_pts[:, :2], axis=0)
     in_cluster = np.linalg.norm(cand_pts[:, :2] - rough_xy, axis=1) <= 0.022
     nut_pts = cand_pts[in_cluster]
+    nut_px = cand_px[in_cluster]
     if len(nut_pts) < 55:
         return None, {
             "t_base_cam": t_base_cam,
@@ -295,13 +475,30 @@ def detect_nut_near(
             "reason": f"nut_height_out_of_range({height_p98_mm:.1f}mm)",
         }
 
-    # Prefer upper hex body points (z >= 5.5 mm above table) for coaxial center estimation
+    # Prefer upper hex body points (z >= 5.5 mm above table) for 3D center seed, then refine via
+    # the hole-filled 2D circular bottom-flange silhouette so one-sided stereo-IR chrome glare
+    # cannot bias the coaxial grasp center.
     upper_pts = nut_pts[rel_z >= 0.0055]
     center_xy = (
         np.median(upper_pts[:, :2], axis=0)
         if len(upper_pts) >= 25
         else np.median(nut_pts[:, :2], axis=0)
     )
+    sil_refined = _refine_circular_silhouette_xy(
+        fg_mask,
+        fov_mask,
+        nut_px,
+        plane_z_m=local_table_z + 0.5 * (NUT_FLANGE_HEIGHT_MM / 1000.0),
+        t_base_cam=t_base_cam,
+        cam_cfg=cam_cfg,
+        ref_xy_m=center_xy,
+    )
+    if sil_refined is not None:
+        center_xy, outer_diam_mm = sil_refined
+    else:
+        radii = np.linalg.norm(nut_pts[:, :2] - center_xy, axis=1)
+        outer_diam_mm = float(2.0 * np.percentile(radii, 95.0) * 1000.0)
+
     try:
         validate_xy_in_workspace(center_xy, "Detected nut center", workspace_bounds)
     except PerceptionError:
@@ -311,12 +508,16 @@ def detect_nut_near(
             "reason": "nut_out_of_workspace",
         }
 
-    radii = np.linalg.norm(nut_pts[:, :2] - center_xy, axis=1)
-    outer_diam_mm = float(2.0 * np.percentile(radii, 95.0) * 1000.0)
-    yaw_src = (
-        (upper_pts[:, :2] - center_xy) if len(upper_pts) >= 25 else (nut_pts[:, :2] - center_xy)
+    rgb_yaw_deg = _estimate_hex_yaw_from_rgb(
+        color_bgr, center_xy, local_table_z, t_base_cam, cam_cfg
     )
-    yaw_deg = _estimate_hex_yaw_deg(yaw_src)
+    if rgb_yaw_deg is not None:
+        yaw_deg = rgb_yaw_deg
+    else:
+        yaw_src = (
+            (upper_pts[:, :2] - center_xy) if len(upper_pts) >= 25 else (nut_pts[:, :2] - center_xy)
+        )
+        yaw_deg = _estimate_hex_yaw_deg(yaw_src)
 
     est = NutPoseEstimate(
         xy_m=(float(center_xy[0]), float(center_xy[1])),
@@ -345,11 +546,12 @@ def detect_screw_near(
     exclude_xy_m: tuple[float, float] | np.ndarray | None = None,
     exclude_radius_m: float = 0.042,
     handeye_yaml: str | Path = DEFAULT_HANDEYE_YAML,
+    camera_metadata: dict[str, Any] | None = None,
     workspace_bounds: dict[str, float] = WORKSPACE_BOUNDS_M,
 ) -> tuple[ScrewPoseEstimate | None, dict[str, Any]]:
     """Detect and refine the upright tabletop-glued M12 screw near expected_xy_m."""
     handeye = load_handeye_calibration(handeye_yaml)
-    cam_cfg = handeye["camera"]
+    cam_cfg = resolve_camera_config(handeye, color_bgr, depth_m, camera_metadata)
     x_flange_cam = np.asarray(handeye["extrinsics"]["X_flange_cam"], dtype=np.float64)
     t_base_cam = np.asarray(t_base_flange, dtype=np.float64).reshape(4, 4) @ x_flange_cam
     exp_xy = np.asarray(expected_xy_m, dtype=np.float64).reshape(2)
@@ -363,7 +565,14 @@ def detect_screw_near(
     h, w = depth_m.shape
     ys, xs = np.mgrid[0:h, 0:w]
     fov_mask = (
-        (ys >= int(0.06 * h)) & (ys < int(0.88 * h)) & (xs >= int(0.06 * w)) & (xs < int(0.94 * w))
+        np.ones((h, w), dtype=bool)
+        if cam_cfg.get("type") == "realsense"
+        else (
+            (ys >= int(0.06 * h))
+            & (ys < int(0.88 * h))
+            & (xs >= int(0.06 * w))
+            & (xs < int(0.94 * w))
+        )
     )
     valid_d = np.isfinite(depth_m) & (depth_m > 0.07) & (depth_m < 0.72) & fov_mask
     if int(np.count_nonzero(valid_d)) < 200:
@@ -461,6 +670,7 @@ def detect_nut_and_screw_overview(
     nut_prior_xy: tuple[float, float] = (0.3538, -0.0114),
     screw_prior_xy: tuple[float, float] = (0.3560, -0.1028),
     handeye_yaml: str | Path = DEFAULT_HANDEYE_YAML,
+    camera_metadata: dict[str, Any] | None = None,
     workspace_bounds: dict[str, float] = WORKSPACE_BOUNDS_M,
 ) -> tuple[NutPoseEstimate, ScrewPoseEstimate, dict[str, Any]]:
     """Detect both the tabletop nut and the upright glued screw from an overview RGB-D frame."""
@@ -471,6 +681,7 @@ def detect_nut_and_screw_overview(
         screw_prior_xy,
         search_radius_m=0.14,
         handeye_yaml=handeye_yaml,
+        camera_metadata=camera_metadata,
         workspace_bounds=workspace_bounds,
     )
     if screw_est is None:
@@ -485,6 +696,7 @@ def detect_nut_and_screw_overview(
         exclude_xy_m=screw_est.xy_m,
         exclude_radius_m=0.042,
         handeye_yaml=handeye_yaml,
+        camera_metadata=camera_metadata,
         workspace_bounds=workspace_bounds,
     )
     if nut_est is None:
@@ -508,11 +720,12 @@ def verify_threaded_nut(
     initial_nut_xy_m: tuple[float, float] | np.ndarray | None = None,
     expected_nut_bottom_z_mm: float = SCREW_HEAD_LEN_MM,
     handeye_yaml: str | Path = DEFAULT_HANDEYE_YAML,
+    camera_metadata: dict[str, Any] | None = None,
     table_z_m: float = 0.0,
 ) -> tuple[ThreadedNutVerification, dict[str, Any]]:
     """Verify in closed loop that the initial nut site is cleared and the nut sits coaxially on the screw."""
     handeye = load_handeye_calibration(handeye_yaml)
-    cam_cfg = handeye["camera"]
+    cam_cfg = resolve_camera_config(handeye, color_bgr, depth_m, camera_metadata)
     x_flange_cam = np.asarray(handeye["extrinsics"]["X_flange_cam"], dtype=np.float64)
     t_base_cam = np.asarray(t_base_flange, dtype=np.float64).reshape(4, 4) @ x_flange_cam
     s_xy = np.asarray(screw_xy_m, dtype=np.float64).reshape(2)
@@ -562,19 +775,36 @@ def verify_threaded_nut(
         & (pts_base[:, 2] <= local_table_z + 0.056)
     )
     assembly_pts = pts_base[assembly_mask]
+    assembly_px = px_all[assembly_mask]
     rel_z = assembly_pts[:, 2] - local_table_z if len(assembly_pts) else np.zeros(0)
 
-    # Points on the nut flange/hex body outside the 12 mm screw shaft (r in [6.8, 16.5] mm, z >= 13 mm)
+    # Points on the nut hex/flange annulus outside stereo block-fattening around the r=6 mm bolt
+    # shaft (r >= 8.0 mm) and strictly above the 14.0 mm bolt head shoulder (z >= 15.5 mm).
     r_from_screw = (
         np.linalg.norm(assembly_pts[:, :2] - s_xy, axis=1) if len(assembly_pts) else np.zeros(0)
     )
-    nut_ring_mask = (r_from_screw >= 0.0068) & (r_from_screw <= 0.0165) & (rel_z >= 0.013)
+    nut_ring_mask = (r_from_screw >= 0.0080) & (r_from_screw <= 0.0165) & (rel_z >= 0.0155)
     nut_ring_pts = assembly_pts[nut_ring_mask]
+    nut_ring_px = assembly_px[nut_ring_mask]
     nut_ring_count = len(nut_ring_pts)
 
     if nut_ring_count >= 25:
         measured_xy = np.median(nut_ring_pts[:, :2], axis=0)
         nut_top_height_mm = float(np.percentile(nut_ring_pts[:, 2] - local_table_z, 95.0) * 1000.0)
+        flange_mid_z = local_table_z + max(
+            0.002, (nut_top_height_mm - NUT_HEIGHT_MM + 0.5 * NUT_FLANGE_HEIGHT_MM) / 1000.0
+        )
+        sil_refined = _refine_circular_silhouette_xy(
+            fg_mask,
+            np.ones((h, w), dtype=bool),
+            nut_ring_px,
+            plane_z_m=flange_mid_z,
+            t_base_cam=t_base_cam,
+            cam_cfg=cam_cfg,
+            ref_xy_m=measured_xy,
+        )
+        if sil_refined is not None:
+            measured_xy = sil_refined[0]
     elif len(assembly_pts) >= 30:
         measured_xy = np.median(assembly_pts[:, :2], axis=0)
         nut_top_height_mm = float(np.percentile(rel_z, 80.0) * 1000.0)

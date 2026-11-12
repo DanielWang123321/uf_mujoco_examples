@@ -10,7 +10,10 @@ from pathlib import Path
 import mujoco
 import numpy as np
 from ufactory_mujoco.calibration import KinematicsCalibration, apply_calibration_to_model
+from ufactory_mujoco.ik import solve_ik_trajectory
 from ufactory_mujoco.sim_robot import SimRobot
+
+from .motion import smooth_step_durations
 
 
 class TaskError(RuntimeError):
@@ -79,6 +82,53 @@ class TaskSimRobot(SimRobot):
                 np.asarray(q_goal[: self.n_arm], dtype=np.float64).copy()
             )
         super().move_joints(q_goal, duration, wait=wait)
+
+    def move_tcp(
+        self,
+        pos: np.ndarray,
+        quat: np.ndarray | None,
+        duration: float,
+        wait: bool = True,
+        *,
+        steps: int = 50,
+        soft_landing: bool = False,
+    ) -> None:
+        """Move along a straight Cartesian path, optionally with soft-landing deceleration."""
+        if not soft_landing:
+            super().move_tcp(pos, quat, duration, wait=wait, steps=steps)
+            return
+        pos0, quat0 = self.get_tcp_pose()
+        s = np.linspace(0.0, 1.0, steps + 1)[1:]
+        waypoints = pos0 + s[:, None] * (np.asarray(pos, dtype=np.float64) - pos0)
+        quat_traj = None
+        if quat is not None:
+            quat_goal = np.asarray(quat, dtype=np.float64)
+            q0_conj = np.array([quat0[0], -quat0[1], -quat0[2], -quat0[3]], dtype=np.float64)
+            # The integrator right-multiplies a tool-frame rotation increment.
+            q_delta_local = np.empty(4, dtype=np.float64)
+            mujoco.mju_mulQuat(q_delta_local, q0_conj, quat_goal)
+            rotvec_local = np.empty(3, dtype=np.float64)
+            mujoco.mju_quat2Vel(rotvec_local, q_delta_local, 1.0)
+            quat_traj = np.empty((steps, 4), dtype=np.float64)
+            for i in range(steps):
+                quat_traj[i] = quat0
+                mujoco.mju_quatIntegrate(quat_traj[i], rotvec_local, float(s[i]))
+        q_start = self.data.qpos.copy()
+        q_traj, ok = solve_ik_trajectory(
+            self.model, self.eval_data, self._tcp_site_name(), waypoints, quat_traj, q_start
+        )
+        if not ok:
+            raise RuntimeError(f"IK did not converge for target pos={pos} quat={quat}")
+        dts = smooth_step_durations(
+            duration,
+            steps,
+            soft_landing=True,
+            min_dt=4 * self.model.opt.timestep,
+        )
+        for q, seg in zip(q_traj, dts, strict=True):
+            self.move_joints(q[: self.n_arm], float(seg), wait=False)
+        if wait:
+            self.settle(0.3)
 
     def check_viewer(self) -> None:
         if self._viewer is not None and not self._viewer.is_running():
@@ -190,11 +240,12 @@ def move_tcp_checked(
     *,
     steps: int,
     wait: bool = True,
+    soft_landing: bool = False,
 ) -> None:
     """``robot.move_tcp`` that converts IK / trajectory failures into ``TaskError``."""
     robot.check_viewer()
     try:
-        robot.move_tcp(pos, quat, duration, wait=wait, steps=steps)
+        robot.move_tcp(pos, quat, duration, wait=wait, steps=steps, soft_landing=soft_landing)
     except RuntimeError as exc:
         if isinstance(exc, TaskError):
             raise

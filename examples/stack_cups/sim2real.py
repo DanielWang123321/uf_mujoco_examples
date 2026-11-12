@@ -28,6 +28,7 @@ from ufactory_mujoco.safety import (
 from ufactory_mujoco.task_geometry import GRIP_DOWN_QUAT
 from ufactory_mujoco.xarm_robot import XArmRobot
 
+from common.camera import CameraStream, create_camera_stream
 from common.geometry import yaw_rotate_quat
 from common.motion import (
     interpolate_waypoint_chain,
@@ -37,14 +38,24 @@ from common.motion import (
 )
 from common.objects.paper_cup import GRASP_AXIS_OFFSET_M
 from common.paths import DEFAULT_CALIBRATION_YAML, DEFAULT_HANDEYE_YAML, DEFAULT_ROBOT_IP
-from common.sim2real import config_sha256, flange_pose, make_collision_checker, write_json_report
+from common.sim2real import (
+    camera_run_context,
+    config_sha256,
+    flange_pose,
+    make_collision_checker,
+    pipeline_error_report,
+    record_camera_frame,
+    save_rgbd_capture,
+    verify_controller_tcp_offset_and_fk,
+    write_json_report,
+)
+from common.vision import cup_grasp_yaw_offset, target_cylinder_in_camera_view
 from common.vision import solve_camera_lookdown_q as _solve_camera_lookdown_q
 
 from . import stack_cups as task
 from .perception import (
     WORKSPACE_BOUNDS_M,
     CupPoseEstimate,
-    OrbbecCameraStream,
     capture_rgbd_frame,
     detect_sideways_cups,
     detect_single_cup_near,
@@ -62,14 +73,18 @@ CANDIDATE_REAL_TARGETS_XY: tuple[tuple[float, float], ...] = (
     (0.38, 0.04),
     (0.34, -0.10),
     (0.34, 0.02),
+    (0.30, -0.18),
+    (0.30, 0.20),
 )
 MIN_PICK_PLACE_SEPARATION_M = 0.110
 MIN_CAMERA_TABLE_CLEARANCE_M = 0.095
 CAM_HOVER_Z_M = 0.280
+CAM_HOVER_Z_REALSENSE_M = 0.360
+POST_VERIFY_CAM_Z_M = 0.420
 MIN_VALID_GRASP_GAP_MM = 30.0
-REAL_GRASP_GAP_MM = 53.0
-REAL_GRASP_SPEED_PCT = 20.0
-REAL_GRASP_FORCE_PCT = 15.0
+REAL_GRASP_GAP_MM = 58.0
+REAL_GRASP_SPEED_PCT = 10.0
+REAL_GRASP_FORCE_PCT = 5.0
 REAL_RELEASE_GAP_MM = 84.0
 REAL_RELEASE_SPEED_PCT = 25.0
 
@@ -291,6 +306,7 @@ def run_digital_twin_preflight(
                 target_xy=target_xy_m,
                 q_init=q_start,
                 recorded_cycles=cycles,
+                grasp_yaw_offset_rad=cup_grasp_yaw_offset(handeye),
             )
         except Exception as exc:  # noqa: BLE001
             failures.append(f"Digital-twin rollout failed: {exc}")
@@ -391,7 +407,7 @@ def replan_single_cup_cycle(
     grasp_center = bot_xy + GRASP_AXIS_OFFSET_M * axis[:2]
     grasp = np.array([grasp_center[0], grasp_center[1], table_z + task.GRASP_TCP_Z_M])
     approach = np.array([grasp_center[0], grasp_center[1], table_z + 0.16])
-    grasp_quat = yaw_rotate_quat(yaw_rad, GRIP_DOWN_QUAT)
+    grasp_quat = yaw_rotate_quat(yaw_rad + cup_grasp_yaw_offset(handeye), GRIP_DOWN_QUAT)
 
     with task.StackCupRobot(viewer=False, calibration=calibration) as sim_robot:
         q_full = sim_robot.data.qpos.copy()
@@ -450,7 +466,8 @@ def run_sim2real_pipeline(
     num_cups: int = 2,
     ip: str = DEFAULT_ROBOT_IP,
     calibration_path: str | Path = DEFAULT_CALIBRATION_YAML,
-    handeye_path: str | Path = DEFAULT_HANDEYE_YAML,
+    handeye_path: str | Path | None = None,
+    camera_type: str = "realsense",
     camera_serial: str = "",
     cup_poses_override: list[float] | tuple[float, ...] | None = None,
     target_xy_override: tuple[float, float] | None = None,
@@ -467,23 +484,41 @@ def run_sim2real_pipeline(
         raise ValueError(f"Unsupported hardware mode: {mode!r}")
     enforce_single_cycle(cycles, mode)
 
+    handeye_path, camera_context = camera_run_context(camera_type, handeye_path)
+    result_payload: dict[str, Any] = {
+        "mode": mode,
+        "ok": False,
+        "completed": False,
+        **camera_context,
+    }
     calib = load_kinematics_calibration(calibration_path, robot="xarm6")
 
-    with XArmRobot(
-        ip,
-        robot="xarm6",
-        gripper="gripper_g2",
-        model_path=task.SCENE,
-        calibration=calib,
-        read_only=True,
-    ) as robot:
+    with (
+        pipeline_error_report(report_path, result_payload),
+        XArmRobot(
+            ip,
+            robot="xarm6",
+            gripper="gripper_g2",
+            model_path=task.SCENE,
+            calibration=calib,
+            read_only=True,
+        ) as robot,
+    ):
+        tcp_check = verify_controller_tcp_offset_and_fk(robot)
+        result_payload["controller_tcp_check"] = tcp_check
+        print(
+            f"[Kinematics] SDK tcp_offset={tcp_check['tcp_offset_mm_rad']} (mm, rad), "
+            f"FK flange error={tcp_check['fk_flange_pos_error_mm']:.3f} mm / "
+            f"{tcp_check['fk_flange_rot_error_deg']:.4f} deg",
+            flush=True,
+        )
         q_obs = robot.get_joint_positions()
         t_base_flange = flange_pose(robot.model, robot.data)
 
-        # Step 1: Acquire multiple cup 6D poses (from Eye-in-Hand Gemini 305 or manual override)
+        # Step 1: Acquire multiple cup 6D poses (from the wrist RGB-D camera or manual override)
         color_bgr: np.ndarray | None = None
         debug_info: dict[str, Any] = {}
-        cam_stream: OrbbecCameraStream | None = None
+        cam_stream: CameraStream | None = None
         try:
             if cup_poses_override is not None:
                 cup_poses = pose_estimates_from_manual(cup_poses_override, num_cups=num_cups)
@@ -495,18 +530,23 @@ def run_sim2real_pipeline(
                     )
             else:
                 if mode == "real":
-                    cam_stream = OrbbecCameraStream(camera_serial)
+                    cam_stream = create_camera_stream(camera_type, camera_serial)
                     cam_stream.start()
                 print(
-                    f"[Perception] Capturing RGB-D from Orbbec Gemini 305 to detect {num_cups} cups ...",
+                    f"[Perception] Capturing RGB-D from {camera_type} to detect {num_cups} cups ...",
                     flush=True,
                 )
-                color_bgr, depth_m, _ = capture_rgbd_frame(serial=camera_serial, stream=cam_stream)
+                color_bgr, depth_m, camera_meta = capture_rgbd_frame(
+                    camera_type=camera_type, serial=camera_serial, stream=cam_stream
+                )
+                record_camera_frame(camera_context, "overview", camera_meta, t_base_flange)
+                save_rgbd_capture(save_vis_path, color_bgr, depth_m, camera_meta, t_base_flange)
                 cup_poses, debug_info = detect_sideways_cups(
                     color_bgr,
                     depth_m,
                     t_base_flange,
                     num_cups=num_cups,
+                    camera_metadata=camera_meta,
                     handeye_yaml=handeye_path,
                 )
                 for idx, cp in enumerate(cup_poses, start=1):
@@ -545,6 +585,7 @@ def run_sim2real_pipeline(
                 handeye_yaml=handeye_path,
                 headless=headless,
             )
+            result_payload["digital_twin"] = twin_report.as_dict()
             if not twin_report.ok:
                 reason_str = "; ".join(twin_report.failures)
                 raise SafetyGateError(
@@ -571,23 +612,28 @@ def run_sim2real_pipeline(
                     "cup_poses": [c.as_dict() for c in cup_poses],
                     "target_xy": target_xy.tolist(),
                     "calibration_sha256": calib.sha256,
+                    "tcp_offset_mm_rad": tcp_check["tcp_offset_mm_rad"],
+                    **camera_context,
                 }
             )
 
-            result_payload: dict[str, Any] = {
-                "mode": mode,
-                "robot": "xarm6",
-                "gripper": "gripper_g2",
-                "num_cups": num_cups,
-                "serial_number": robot.serial_number,
-                "calibration_sha256": calib.sha256,
-                "config_sha256": cfg_hash,
-                "program_sha256": prog_hash,
-                "digital_twin": twin_report.as_dict(),
-                "ok": True,
-                "success": True,
-                "completed": True,
-            }
+            result_payload.update(
+                {
+                    "mode": mode,
+                    "robot": "xarm6",
+                    "gripper": "gripper_g2",
+                    "num_cups": num_cups,
+                    "serial_number": robot.serial_number,
+                    "calibration_sha256": calib.sha256,
+                    **camera_context,
+                    "config_sha256": cfg_hash,
+                    "program_sha256": prog_hash,
+                    "digital_twin": twin_report.as_dict(),
+                    "ok": True,
+                    "success": True,
+                    "completed": True,
+                }
+            )
 
             if mode == "dry-run":
                 write_json_report(report_path, result_payload)
@@ -638,6 +684,7 @@ def run_sim2real_pipeline(
                 program_sha256=prog_hash,
             )
             robot.unlock_motion(approval)
+            result_payload.update(confirm_real=True, completed=False)
             print(
                 f"[Real] Motion unlocked for one cycle; stacking {num_cups} cups ...",
                 flush=True,
@@ -654,17 +701,20 @@ def run_sim2real_pipeline(
                     speed_percent=50.0,
                     force_percent=50.0,
                 )
+                cam_hover_z_m = (
+                    CAM_HOVER_Z_REALSENSE_M if camera_type == "realsense" else CAM_HOVER_Z_M
+                )
                 if use_closed_loop_cam:
                     q_cam_hover_1 = solve_camera_lookdown_q(
                         cup_poses[0].cup_center_xy_m,
-                        z_cam_m=CAM_HOVER_Z_M,
+                        z_cam_m=cam_hover_z_m,
                         q_seed=q_obs,
                         calibration=calib,
                         handeye_yaml=handeye_path,
                     )
                     print(
                         f"  [Cup 1/{num_cups} - 1/5] Open the gripper and move the camera above cup #1 "
-                        f"(z_cam={CAM_HOVER_Z_M * 1000:.0f} mm) ...",
+                        f"(z_cam={cam_hover_z_m * 1000:.0f} mm) ...",
                         flush=True,
                     )
                     stream_waypoints_on_real(
@@ -687,9 +737,16 @@ def run_sim2real_pipeline(
                 if use_closed_loop_cam:
                     q_hover_now = robot.get_joint_positions()
                     t_bf_hover = flange_pose(robot.model, robot.data)
-                    hover_bgr, hover_depth, _ = capture_rgbd_frame(
-                        serial=camera_serial, stream=cam_stream
+                    hover_bgr, hover_depth, hover_meta = capture_rgbd_frame(
+                        camera_type=camera_type, serial=camera_serial, stream=cam_stream
                     )
+                    record_camera_frame(camera_context, f"near_cup_{idx}", hover_meta, t_bf_hover)
+                    near_vis = (
+                        Path(save_vis_path).with_name(f"real_hover_cup{idx}.png")
+                        if save_vis_path
+                        else None
+                    )
+                    save_rgbd_capture(near_vis, hover_bgr, hover_depth, hover_meta, t_bf_hover)
                     refined_cup, hover_dbg = detect_single_cup_near(
                         hover_bgr,
                         hover_depth,
@@ -697,6 +754,7 @@ def run_sim2real_pipeline(
                         cup_poses[idx - 1].cup_center_xy_m,
                         search_radius_m=0.12,
                         exclude_xy_m=(target_xy if idx > 1 else None),
+                        camera_metadata=hover_meta,
                         handeye_yaml=handeye_path,
                     )
                     if refined_cup is None:
@@ -867,7 +925,7 @@ def run_sim2real_pipeline(
                     if use_closed_loop_cam:
                         q_cam_hover_next = solve_camera_lookdown_q(
                             cup_poses[idx].cup_center_xy_m,
-                            z_cam_m=CAM_HOVER_Z_M,
+                            z_cam_m=cam_hover_z_m,
                             q_seed=q_obs,
                             calibration=calib,
                             handeye_yaml=handeye_path,
@@ -878,7 +936,7 @@ def run_sim2real_pipeline(
                         ]
                         print(
                             f"  [Cup {idx}->{idx + 1}/{num_cups}] Retreat and move the camera above "
-                            f"cup #{idx + 1} (z_cam={CAM_HOVER_Z_M * 1000:.0f} mm) ...",
+                            f"cup #{idx + 1} (z_cam={cam_hover_z_m * 1000:.0f} mm) ...",
                             flush=True,
                         )
                         stream_waypoints_on_real(
@@ -918,9 +976,43 @@ def run_sim2real_pipeline(
 
             post_ok = True
             if post_verify:
+                moved_for_verify = False
+                min_clear = 0.28 if camera_type == "realsense" else 0.15
+                stack_top_z = (
+                    cup_poses[0].table_z_m + task.CUP_HEIGHT_M + 0.025 * max(1, num_cups - 1)
+                )
+                if not target_cylinder_in_camera_view(
+                    t_base_flange_after,
+                    target_xy,
+                    top_z_m=stack_top_z,
+                    table_z_m=cup_poses[0].table_z_m,
+                    min_cam_clearance_m=min_clear,
+                    handeye_yaml=handeye_path,
+                    camera_meta=camera_context.get("camera"),
+                ):
+                    q_verify = solve_camera_lookdown_q(
+                        target_xy,
+                        z_cam_m=POST_VERIFY_CAM_Z_M,
+                        q_seed=q_obs,
+                        calibration=calib,
+                        handeye_yaml=handeye_path,
+                    )
+                    print(
+                        f"[Verify] Moving the camera {POST_VERIFY_CAM_Z_M * 1000:.0f} mm above the cup stack ...",
+                        flush=True,
+                    )
+                    stream_waypoints_on_real(robot, [q_verify], soft_landing=True)
+                    robot.get_joint_positions()
+                    t_base_flange_after = flange_pose(robot.model, robot.data)
+                    moved_for_verify = True
+
                 print("[Verify] Capturing RGB-D to verify the cup stack ...", flush=True)
-                after_bgr, after_depth, _ = capture_rgbd_frame(
-                    serial=camera_serial, stream=cam_stream
+                after_bgr, after_depth, after_meta = capture_rgbd_frame(
+                    camera_type=camera_type, serial=camera_serial, stream=cam_stream
+                )
+                record_camera_frame(camera_context, "post_task", after_meta, t_base_flange_after)
+                save_rgbd_capture(
+                    save_after_vis_path, after_bgr, after_depth, after_meta, t_base_flange_after
                 )
                 post_check, after_debug = verify_stacked_cups(
                     after_bgr,
@@ -929,6 +1021,7 @@ def run_sim2real_pipeline(
                     target_xy,
                     num_cups=num_cups,
                     initial_cups=cup_poses,
+                    camera_metadata=after_meta,
                     handeye_yaml=handeye_path,
                     table_z_m=cup_poses[0].table_z_m,
                 )
@@ -937,6 +1030,10 @@ def run_sim2real_pipeline(
                         after_bgr, post_check, after_debug, save_after_vis_path
                     )
                     print(f"[Verify] Saved verification overlay: {after_file}", flush=True)
+                if moved_for_verify:
+                    stream_waypoints_on_real(robot, [q_obs], soft_landing=False)
+                    q_final = robot.get_joint_positions()
+                    final_err_rad = float(np.max(np.abs(q_final - q_obs)))
                 result_payload["post_stack_verification"] = post_check.as_dict()
                 post_ok = bool(post_check.ok)
                 status_tag = "PASS" if post_ok else f"FAIL ({post_check.reason})"
@@ -951,6 +1048,7 @@ def run_sim2real_pipeline(
             overall_ok = bool(final_err_rad < 0.08 and post_ok)
             result_payload.update(
                 confirm_real=True,
+                completed=True,
                 commanded_grasp_gap_mm=grasp_gap_mm,
                 measured_grasp_gaps_mm=measured_grasp_gaps_mm,
                 refined_cup_poses=refined_cup_poses_log,

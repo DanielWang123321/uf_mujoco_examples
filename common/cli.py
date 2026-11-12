@@ -16,10 +16,11 @@ from typing import Any
 
 import yaml
 
+from common.camera import CAMERA_TYPES, DEFAULT_CAMERA_TYPE
 from common.paths import (
     DEFAULT_CALIBRATION_YAML,
-    DEFAULT_HANDEYE_YAML,
     DEFAULT_ROBOT_IP,
+    default_handeye_path,
     resolve_repo_path,
 )
 
@@ -61,7 +62,13 @@ def build_parser(description: str | None, *, default_config: Path) -> argparse.A
     parser.add_argument("--calibration", default=None, help="xArm kinematic calibration YAML")
     parser.add_argument("--handeye", default=None, help="Eye-in-Hand calibration YAML")
     parser.add_argument(
-        "--camera-serial", default=None, help="Orbbec camera serial number (default: first found)"
+        "--camera-type",
+        choices=CAMERA_TYPES,
+        default=None,
+        help="RGB-D camera backend (default: realsense / D435)",
+    )
+    parser.add_argument(
+        "--camera-serial", default=None, help="SDK camera serial number (default: first found)"
     )
     parser.add_argument(
         "--confirm-real", action="store_true", help="Authorize one real motion cycle (--mode real)"
@@ -103,6 +110,7 @@ class RunOptions:
     ip: str
     calibration_path: str
     handeye_path: str
+    camera_type: str
     camera_serial: str
     confirm_real: bool
     cycles: int
@@ -120,6 +128,8 @@ def resolve_run_options(args: argparse.Namespace) -> RunOptions:
     robot_cfg = _section(cfg, "robot")
     cam_cfg = _section(cfg, "camera")
     task_cfg = _section(cfg, "task")
+    camera_type = str(_pick(args.camera_type, cam_cfg.get("type", DEFAULT_CAMERA_TYPE)))
+    handeye_default = default_handeye_path(camera_type)
     return RunOptions(
         mode=str(_pick(args.mode, cfg.get("mode", "sim"))),
         headless=bool(_pick(args.headless, cfg.get("headless", False))),
@@ -130,8 +140,9 @@ def resolve_run_options(args: argparse.Namespace) -> RunOptions:
             )
         ),
         handeye_path=str(
-            resolve_repo_path(_pick(args.handeye, cam_cfg.get("handeye", DEFAULT_HANDEYE_YAML)))
+            resolve_repo_path(_pick(args.handeye, cam_cfg.get("handeye")) or handeye_default)
         ),
+        camera_type=camera_type,
         camera_serial=str(_pick(args.camera_serial, cam_cfg.get("serial")) or ""),
         confirm_real=bool(args.confirm_real),
         cycles=int(args.cycles),

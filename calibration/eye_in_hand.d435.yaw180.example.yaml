@@ -1,0 +1,73 @@
+# Alternative flange-Z rotation fixture for regression tests only; not current hardware calibration.
+camera:
+  type: realsense
+  width: 640
+  height: 480
+  K:
+  - - 607.7911987304688
+    - 0.0
+    - 317.3393249511719
+  - - 0.0
+    - 607.936279296875
+    - 237.68582153320312
+  - - 0.0
+    - 0.0
+    - 1.0
+  distortion:
+  - 0.0
+  - 0.0
+  - 0.0
+  - 0.0
+  - 0.0
+  distortion_model: inverse_brown_conrady
+extrinsics:
+  X_flange_cam:
+  - - 0.019079328515806904
+    - 0.9998098127124249
+    - 0.0040395083032253015
+    - -0.067052239
+  - - -0.9997819691791965
+    - 0.019044198487205677
+    - 0.008563446043971858
+    - 0.0311387575
+  - - 0.00848488818747912
+    - -0.004202012366214633
+    - 0.9999551738775694
+    - 0.021611456
+  - - 0.0
+    - 0.0
+    - 0.0
+    - 1.0
+source:
+  project: ufactory_vision
+  file: ggcnn_grasping_demo/example/realsense_d435/run_rs_d435_grasp.py
+  euler_eef_to_color_opt_m_rad:
+  - 0.067052239
+  - -0.0311387575
+  - 0.021611456
+  - -0.004202176
+  - -0.00848499
+  - 1.5898775
+  rotation_order: Rz @ Ry @ Rx
+mount_adjustment:
+  description: 'Hypothetical entire bracket rotated 180 deg around flange Z. This
+    is not the current D435 installation: the user clarified an in-place camera-body
+    flip. Use measured calibration for hardware.'
+  X_flange_current_from_reference:
+  - - -1.0
+    - 0.0
+    - 0.0
+    - 0.0
+  - - 0.0
+    - -1.0
+    - 0.0
+    - 0.0
+  - - 0.0
+    - 0.0
+    - 1.0
+    - 0.0
+  - - 0.0
+    - 0.0
+    - 0.0
+    - 1.0
+  composition: X_flange_cam_current = Rz_flange(pi) @ X_flange_cam_reference

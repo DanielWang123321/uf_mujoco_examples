@@ -22,7 +22,9 @@ python -m examples.screw_nut --mode real --confirm-real       # 真机
 | `--screw-xy X Y` | 螺丝位置（m）。仿真默认值为 `task.screw_xy`。硬件模式下同时给出 `--nut-pose` 和 `--screw-xy` 时不使用相机识别。 |
 | `--thread-turns N` | 螺母套上螺丝顶端后的顺时针圈数，`0 < N ≤ 12`（默认 10）。 |
 
-公共参数（`--mode`、`--headless`、`--ip`、`--calibration`、`--handeye`、`--camera-serial`、`--post-verify`、`--save-vis`、`--save-after-vis`、`--report`）及默认值见 [`config.yaml`](config.yaml)。
+公共参数（`--mode`、`--headless`、`--ip`、`--calibration`、`--handeye`、`--camera-type`、`--camera-serial`、`--post-verify`、`--save-vis`、`--save-after-vis`、`--report`）及默认值见 [`config.yaml`](config.yaml)。
+
+默认相机为 D435/D435i，1280×720@30。Gemini 305 使用 `--camera-type orbbec`（1280×800@30）。`camera.handeye` 留空时按相机类型选择；`--handeye` 可覆盖。实时采集为检测、复测和验证传递彩色内参，详见[相机配置](../../README_zh.md#硬件配置)。
 
 ## 原理
 
@@ -40,7 +42,7 @@ python -m examples.screw_nut --mode real --confirm-real       # 真机
 1. 采集一帧 RGB-D，识别螺母和螺丝（相对绿色桌垫做前景分割 + 深度）。
 2. 在加载标定参数的数字孪生中运行任务。对 50 Hz 关节轨迹的每个采样点检查关节限位、碰撞、腕部相机距桌面 ≥ 88 mm、关节步长 ≤ 0.15 rad。
 3. `sdk-sim` 在控制器仿真模式中回放轨迹。`real` 模式：
-   - 相机分别移动到螺母和螺丝正上方 250 mm 处重新测量，并重新规划；
+   - 相机分别移动到螺母和螺丝正上方（D435 为 `330 mm`，Gemini 为 `250 mm`）重新测量，并重新规划；
    - 以 25 % 夹持力夹取；实测开度 < 12 mm（空抓）则中止；
    - 每次 J6 反转前要求夹爪张开 ≥ 42 mm（避开法兰）；
    - 每次重新夹紧后，若开度 > 21.2 mm，说明手指滑到了 Ø29 mm 法兰上：夹爪张开，TCP 上抬 3.5–5.0 mm 后重新夹紧（每次旋转最多 3 次，结束时最多追加 3 次旋转）；

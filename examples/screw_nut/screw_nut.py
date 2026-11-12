@@ -1137,6 +1137,7 @@ def _run(args) -> None:
         ip=opts.ip,
         calibration_path=opts.calibration_path,
         handeye_path=opts.handeye_path,
+        camera_type=opts.camera_type,
         camera_serial=opts.camera_serial,
         nut_pose_override=nut_override,
         screw_xy_override=screw_override,

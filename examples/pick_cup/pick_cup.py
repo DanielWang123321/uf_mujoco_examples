@@ -189,6 +189,7 @@ def run_pick_cup(
     target_xy: np.ndarray | None = None,
     q_init: np.ndarray | None = None,
     recorded_phases: TwinPhaseWaypoints | None = None,
+    grasp_yaw_offset_rad: float = 0.0,
 ) -> dict[str, float]:
     """Run one pick-flip-place cycle. The cup moves only through contacts (no welds).
 
@@ -209,7 +210,7 @@ def run_pick_cup(
     approach[2] = table_z + 0.16
 
     axis_yaw_rad = float(np.arctan2(axis[1], axis[0]))
-    grasp_quat = yaw_rotate_quat(axis_yaw_rad, GRIP_DOWN_QUAT)
+    grasp_quat = yaw_rotate_quat(axis_yaw_rad + grasp_yaw_offset_rad, GRIP_DOWN_QUAT)
 
     print("Approach the cup body", flush=True)
     if recorded_phases is not None:
@@ -220,7 +221,7 @@ def run_pick_cup(
         raise TaskError(f"IK did not converge for the approach pose {approach}")
     robot.move_joints(q[: robot.n_arm], 3.0)
     robot.check_viewer()
-    move_tcp_checked(robot, grasp, grasp_quat, 2.0, steps=30)
+    move_tcp_checked(robot, grasp, grasp_quat, 2.0, steps=30, soft_landing=True)
     robot.active_waypoint_sink = None
 
     print("Grasp: confirm bilateral contact", flush=True)
@@ -249,7 +250,11 @@ def run_pick_cup(
         raise TaskError("Lift failed: cup did not leave the table")
 
     position, quat = robot.get_tcp_pose()
-    default_scene = cup_pose is None and np.allclose(active_target_xy, TARGET_XY)
+    default_scene = (
+        cup_pose is None
+        and np.allclose(active_target_xy, TARGET_XY)
+        and abs(grasp_yaw_offset_rad) < 1e-6
+    )
     if default_scene:
         move_tcp_checked(robot, position + np.array([0.12, 0.0, 0.08]), quat, 2.5, steps=40)
         position, quat = robot.get_tcp_pose()
@@ -273,7 +278,7 @@ def run_pick_cup(
         position, quat = robot.get_tcp_pose()
         _, axis = _cup_pose(robot)
         move_tcp_checked(robot, position, rotate_axis_up_quat(axis, quat), 3.0, steps=50)
-        retreat_offset = np.array([0.0, -0.10 * place_side, 0.0])
+        retreat_offset = np.array([0.0, -0.10 * place_side * np.cos(grasp_yaw_offset_rad), 0.0])
 
     print("Carry and place using the live cup position", flush=True)
     position, quat = robot.get_tcp_pose()
@@ -283,7 +288,7 @@ def run_pick_cup(
     position, quat = robot.get_tcp_pose()
     bottom, _ = _cup_pose(robot)
     destination = position + np.r_[active_target_xy - bottom[:2], table_z + 0.002 - bottom[2]]
-    move_tcp_checked(robot, destination, quat, 3.0, steps=50)
+    move_tcp_checked(robot, destination, quat, 3.0, steps=50, soft_landing=True)
     if recorded_phases is not None:
         recorded_phases.grasp_gap_mm = float(robot.g2_controller.position_mm[0])
         robot.active_waypoint_sink = None
@@ -295,7 +300,7 @@ def run_pick_cup(
         destination = (
             position + np.r_[active_target_xy - bottom[:2], table_z + target_z_touch - bottom[2]]
         )
-        move_tcp_checked(robot, destination, quat, 1.2, steps=20)
+        move_tcp_checked(robot, destination, quat, 1.2, steps=20, soft_landing=True)
     if not _contact_between(robot, "table", "cup_bottom"):
         raise TaskError("Place failed: cup bottom does not touch the table")
     _require_bilateral(robot)
@@ -388,6 +393,7 @@ def _run(args) -> None:
         ip=opts.ip,
         calibration_path=opts.calibration_path,
         handeye_path=opts.handeye_path,
+        camera_type=opts.camera_type,
         camera_serial=opts.camera_serial,
         cup_pose_override=cup_override,
         target_xy_override=target_override,

@@ -22,7 +22,9 @@ python -m examples.stack_cups --mode real --confirm-real      # hardware
 | `--target-xy X Y` | Stack position (m), default `task.target_xy`. In hardware modes, if no target is given, a free spot ≥ 110 mm away from all cups is chosen. |
 | `--cup-poses X1 Y1 YAW1 ...` | Cup bottom positions (m) and bottom→rim yaws. In hardware modes it replaces camera detection. |
 
-Shared options (`--mode`, `--headless`, `--ip`, `--calibration`, `--handeye`, `--camera-serial`, `--post-verify`, `--save-vis`, `--save-after-vis`, `--report`) and their defaults are in [`config.yaml`](config.yaml).
+Shared options (`--mode`, `--headless`, `--ip`, `--calibration`, `--handeye`, `--camera-type`, `--camera-serial`, `--post-verify`, `--save-vis`, `--save-after-vis`, `--report`) and their defaults are in [`config.yaml`](config.yaml).
+
+Default camera: D435/D435i, 1280×720@30. For Gemini 305 use `--camera-type orbbec` (1280×800@30). Empty `camera.handeye` selects the backend default; `--handeye` overrides it. Live captures supply color intrinsics to all detection and verification steps. See [camera setup](../../README.md#hardware-setup).
 
 ## How it works
 
@@ -40,7 +42,7 @@ Cup-to-cup contacts use low friction (0.08 < tan 7.1°, the cone half-angle), so
 1. Capture one RGB-D frame and detect all white sideways cups (axis by PCA, bottom/rim end by width and height); cups are picked from right (−Y) to left (+Y).
 2. Run all cycles in the calibrated digital twin. Every sample of the 50 Hz joint stream is checked for joint limits, collisions, wrist-camera height ≥ 95 mm above the table, and joint step ≤ 0.15 rad.
 3. `sdk-sim` replays the stream in the controller's simulation mode. `real`:
-   - before each grasp, moves the camera 280 mm directly above the cup, re-measures it, and replans the grasp; returns home if the cup is gone;
+   - before each grasp, moves the camera directly above the cup (`360 mm` for D435, `280 mm` for Gemini), re-measures it, and replans the grasp; returns home if the cup is gone;
    - aborts and returns home if the measured grasp gap is < 30 mm (empty grasp).
 4. After returning, a second frame verifies the stack (≥ 1200 cup pixels, XY error ≤ 45 mm, rim height ≥ 50 mm, initial cup positions empty).
 

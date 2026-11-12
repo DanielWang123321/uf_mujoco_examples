@@ -128,6 +128,7 @@ def test_config_and_cli_options(tmp_path, monkeypatch):
     default_cfg = demo.load_config()
     assert default_cfg.get("headless") is False
     assert default_cfg.get("task", {}).get("num_cups") == 2
+    assert default_cfg.get("task", {}).get("target_xy") is None
 
     # Invalid --cup-poses count must fail with nonzero exit code
     assert demo.main(["--headless", "--num-cups", "2", "--cup-poses", "0.21", "-0.13"]) == 1
@@ -285,6 +286,15 @@ def test_sim2real_target_selection_and_safety_gates():
     chosen = sim2real.select_safe_stack_target_xy(cups)
     assert np.allclose(chosen, [0.36, -0.06])
 
+    # Cups spanning the central workspace must fall back to a clear side target (>= 110 mm away)
+    central_cups = perception.pose_estimates_from_manual(
+        [0.377, -0.040, -59.8, 0.429, 0.135, -164.2],
+        num_cups=2,
+    )
+    chosen_central = sim2real.select_safe_stack_target_xy(central_cups)
+    assert np.allclose(chosen_central, [0.30, -0.18])
+    assert sim2real._min_distance_to_cups(chosen_central, central_cups) >= 0.110
+
     # Explicit target too close to one of the cups must fail closed
     with pytest.raises(SafetyGateError, match="too close to a cup"):
         sim2real.select_safe_stack_target_xy(cups, requested_target_xy=(0.52, -0.18))
@@ -369,6 +379,10 @@ def test_verify_stacked_cups_closed_loop(tmp_path):
 
 
 def test_trajectory_smooth_deceleration_and_continuity():
+    assert 58.0 <= sim2real.REAL_GRASP_GAP_MM <= 59.0
+    assert sim2real.REAL_GRASP_FORCE_PCT == pytest.approx(5.0)
+    assert sim2real.REAL_GRASP_SPEED_PCT == pytest.approx(10.0)
+
     calib = load_kinematics_calibration(SAMPLE_CALIBRATION_YAML, robot="xarm6")
     cups = perception.pose_estimates_from_manual(
         [0.5682, -0.1669, -142.19, 0.5026, 0.0815, -61.32],

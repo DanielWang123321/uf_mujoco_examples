@@ -1,7 +1,8 @@
 # Core runtime dependencies (same ranges as pyproject.toml).
 # Also requires the sibling checkout ../ufactory_mujoco (see README).
 # Hardware modes additionally need: xarm-python-sdk>=1.18 pyorbbecsdk2>=2.1
-mujoco>=3.15,<4
+# and pyrealsense2>=2.58.3.10794,<3 (both camera SDKs are imported lazily).
+mujoco>=4.0.0,<5
 numpy>=2.3,<3
 scipy>=1.14,<2
 pyyaml>=6.0,<7

@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "uf_mujoco_examples"
-version = "0.0.3"
-description = "Contact-rich MuJoCo manipulation and Sim-to-Real examples for UFACTORY xArm 6 + Gripper G2 + Orbbec Gemini 305"
+version = "0.0.4"
+description = "MuJoCo manipulation and Sim-to-Real examples for xArm 6 + Gripper G2 + RealSense D435 / Gemini 305"
 readme = "README.md"
 license = "BSD-3-Clause"
 license-files = ["LICENSE", "NOTICE"]
@@ -13,7 +13,7 @@ requires-python = ">=3.12"
 authors = [{ name = "UFACTORY Inc." }]
 keywords = ["mujoco", "xarm", "ufactory", "robotics", "sim-to-real", "manipulation"]
 dependencies = [
-    "mujoco>=3.15,<4",
+    "mujoco>=4.0.0,<5",
     "numpy>=2.3,<3",
     "scipy>=1.14,<2",
     "pyyaml>=6.0,<7",
@@ -29,10 +29,11 @@ classifiers = [
 ]
 
 [project.optional-dependencies]
-# Hardware modes (dry-run / sdk-sim / real): xArm SDK and Orbbec SDK
+# Hardware modes (dry-run / sdk-sim / real); camera SDKs are imported lazily.
 real = [
     "xarm-python-sdk>=1.18",
     "pyorbbecsdk2>=2.1",
+    "pyrealsense2>=2.58.3.10794,<3",
 ]
 dev = [
     "pytest>=8.0",
@@ -50,7 +51,7 @@ namespaces = false
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
-testpaths = ["assets", "examples"]
+testpaths = ["assets", "examples", "tests"]
 
 [tool.ruff]
 line-length = 100

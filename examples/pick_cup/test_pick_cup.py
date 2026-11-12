@@ -6,9 +6,12 @@ import mujoco
 import numpy as np
 import pytest
 import yaml
+from ufactory_mujoco.calibration import load_kinematics_calibration
 from ufactory_mujoco.grippers import bodies_in_contact
 from ufactory_mujoco.safety import SafetyGateError, enforce_single_cycle
 
+from common.motion import interpolate_waypoint_chain
+from common.paths import DEFAULT_HANDEYE_YAML, SAMPLE_CALIBRATION_YAML
 from examples.pick_cup import perception, sim2real
 from examples.pick_cup import pick_cup as demo
 
@@ -339,3 +342,49 @@ def test_verify_upright_cup_closed_loop(tmp_path):
         color_bgr, v_ok, dbg, tmp_path / "after_verify.png"
     )
     assert after_img.is_file()
+
+
+def test_pick_cup_trajectory_smooth_deceleration_and_soft_landing():
+    """Verify pick_cup uses C2 soft-landing deceleration and gentle real-hardware grasp settings."""
+    assert 58.0 <= sim2real.REAL_GRASP_GAP_MM <= 59.0
+    assert sim2real.REAL_GRASP_FORCE_PCT == pytest.approx(5.0)
+    assert sim2real.REAL_GRASP_SPEED_PCT == pytest.approx(10.0)
+
+    calib = load_kinematics_calibration(SAMPLE_CALIBRATION_YAML, robot="xarm6")
+    cup_pose = perception.pose_estimate_from_manual(0.46, -0.07, 140.0)
+    q_obs = np.array([0.0, -0.453, -0.517, 0.0, 0.970, 0.0], dtype=np.float64)
+    report = sim2real.run_digital_twin_preflight(
+        cup_pose,
+        np.array([0.38, -0.18], dtype=np.float64),
+        q_init=q_obs,
+        calibration=calib,
+        handeye_yaml=DEFAULT_HANDEYE_YAML,
+        headless=True,
+    )
+    assert report.ok, f"Digital twin preflight failed: {report.failures}"
+
+    dt = 0.02
+    q_cur = q_obs.copy()
+    phases = [
+        ("approach", report.phases.approach_waypoints, True),
+        ("lift_flip_place", report.phases.lift_flip_place_waypoints, True),
+        ("retreat", report.phases.retreat_waypoints, False),
+    ]
+    for name, wps, soft_land in phases:
+        seg = interpolate_waypoint_chain(q_cur, wps, dt=dt, soft_landing=soft_land)
+        qd = np.diff(seg, axis=0) / dt
+        max_qd = np.max(np.abs(qd), axis=1)
+        qdd = np.diff(qd, axis=0) / dt
+        max_qdd = np.max(np.abs(qdd), axis=1)
+
+        assert max_qd[0] < 1e-4, f"{name} start velocity not zero: {max_qd[0]}"
+        assert max_qd[-1] < 1e-4, f"{name} end velocity not zero: {max_qd[-1]}"
+        assert float(np.max(max_qdd)) <= 3.5, f"{name} peak qdd too high: {np.max(max_qdd)}"
+        assert np.allclose(seg[-1], wps[-1], atol=1e-6), f"{name} endpoint mismatch"
+
+        if soft_land:
+            last5 = max_qd[-5:]
+            assert float(np.max(last5)) < 0.025, f"{name} soft-landing too fast: {last5}"
+            assert np.all(np.diff(last5) <= 1e-5), f"{name} not monotonically decelerating: {last5}"
+
+        q_cur = seg[-1].copy()

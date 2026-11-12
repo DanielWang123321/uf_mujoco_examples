@@ -22,7 +22,9 @@ python -m examples.screw_nut --mode real --confirm-real       # hardware
 | `--screw-xy X Y` | Screw position (m). Sim default `task.screw_xy`. In hardware modes, giving both `--nut-pose` and `--screw-xy` replaces camera detection. |
 | `--thread-turns N` | Clockwise turns after the nut is on the screw tip, `0 < N ≤ 12` (default 10). |
 
-Shared options (`--mode`, `--headless`, `--ip`, `--calibration`, `--handeye`, `--camera-serial`, `--post-verify`, `--save-vis`, `--save-after-vis`, `--report`) and their defaults are in [`config.yaml`](config.yaml).
+Shared options (`--mode`, `--headless`, `--ip`, `--calibration`, `--handeye`, `--camera-type`, `--camera-serial`, `--post-verify`, `--save-vis`, `--save-after-vis`, `--report`) and their defaults are in [`config.yaml`](config.yaml).
+
+Default camera: D435/D435i, 1280×720@30. For Gemini 305 use `--camera-type orbbec` (1280×800@30). Empty `camera.handeye` selects the backend default; `--handeye` overrides it. Live captures supply color intrinsics to all detection and verification steps. See [camera setup](../../README.md#hardware-setup).
 
 ## How it works
 
@@ -40,7 +42,7 @@ The collision model of the screw has 12 helical ridges (2.4 mm pitch) and the nu
 1. Capture one RGB-D frame and detect the nut and the screw (foreground segmentation against the green table mat + depth).
 2. Run the task in the calibrated digital twin. Every sample of the 50 Hz joint stream is checked for joint limits, collisions, wrist-camera height ≥ 88 mm above the table, and joint step ≤ 0.15 rad.
 3. `sdk-sim` replays the stream in the controller's simulation mode. `real`:
-   - re-measures the nut and the screw with the camera 250 mm directly above each, and replans;
+   - re-measures the nut and the screw with the camera directly above each (`330 mm` for D435, `250 mm` for Gemini), and replans;
    - grasps with 25 % force; aborts if the measured gap is < 12 mm (empty grasp);
    - before each J6 rewind, requires the gripper to open ≥ 42 mm (clear of the flange);
    - after each regrip, a gap > 21.2 mm means the fingers slid onto the Ø29 mm flange: the gripper opens, the TCP rises 3.5–5.0 mm, and grasps again (≤ 3 times per stroke, ≤ 3 extra strokes added at the end);

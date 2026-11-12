@@ -1,0 +1,24 @@
+# Priority: command line > this file > built-in defaults. Simulation only.
+mode: sim
+headless: false
+seed: 0
+report: build/obstacle_avoidance/sim_report.json
+
+task:
+  # Loaded transfer endpoints after pickup / before placement.
+  # Base-frame G2 attachment_site: mm, extrinsic XYZ RPY degrees.
+  start_pose: [350, -200, 300, 180, 0, 0]
+  goal_pose: [350, 200, 300, 180, 0, 0]
+
+planning:
+  step_rad: 0.15
+  edge_resolution_rad: 0.02
+  max_iterations: 2000
+  shortcut_iterations: 200
+  clearance_m: 0.01
+
+motion:
+  execution_clearance_m: 0.005
+  max_velocity_rad_s: 0.65
+  max_acceleration_rad_s2: 2.0
+  timestep_s: 0.001

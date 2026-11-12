@@ -7,12 +7,13 @@ robot:
   calibration: "calibration/xarm6_kinematics.yaml"   # see calibration/README.md
 
 camera:
-  handeye: "calibration/eye_in_hand.yaml"           # see calibration/README.md
-  serial: ""        # Orbbec serial number; empty: first camera found
+  type: realsense   # realsense: D435/D435i 1280x720@30; orbbec: Gemini 305 1280x800@30
+  handeye: null      # null: select by type; explicit path overrides the default
+  serial: ""        # SDK serial number; empty: first camera found
 
 task:
   num_cups: 2         # number of cups to pick and stack (2 or 3)
-  target_xy: [0.30, 0.20]   # stack position [x, y] (m); remove to let hardware modes pick a clear spot
+  target_xy: null     # stack position [x, y] (m); null: [0.30, 0.16] in sim, auto clear spot on hardware
   post_verify: true   # after a real run, re-capture the scene and verify the stack
   save_vis: "build/stack_cups/real_detection.png"
   save_after_vis: "build/stack_cups/real_after_stack.png"

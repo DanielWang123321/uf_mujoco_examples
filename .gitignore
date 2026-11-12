@@ -29,6 +29,7 @@ calibration/*
 !calibration/README.md
 !calibration/README_zh.md
 !calibration/*.example.yaml
+!calibration/eye_in_hand.d435.yaml
 
 # Personal & AI agent development markdown files (local only, never tracked)
 AGENTS.md
@@ -37,6 +38,8 @@ worklog.md
 roadmap.md
 todolist.md
 CLAUDE.md
+.claude/
+dev/
 
 # Caches & virtual environments
 .pytest_cache/

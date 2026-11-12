@@ -1,0 +1,285 @@
+# RealSense D435i (serial 109622071268) on xArm 6 + Gripper G2.
+# Calibrated via 20-pose Bundle Adjustment in camera_tool; live capture always uses SDK color intrinsics.
+timestamp: '2026-11-11T12:09:32'
+calibration_mode: eye_in_hand
+robot_model: xarm6
+camera:
+  name: RealSense D435I
+  model: pinhole
+  serial: '109622071268'
+  width: 1280
+  height: 720
+  fps: 30
+  camera_frame: color_optical_frame
+  depth_aligned_to_color: true
+  sdk_depth_unit_m: 0.0010000000474974513
+  depth_scale_correction: 1.0
+  K:
+  - - 911.686767578125
+    - 0.0
+    - 636.0089721679688
+  - - 0.0
+    - 911.9043579101562
+    - 356.5287170410156
+  - - 0.0
+    - 0.0
+    - 1.0
+  distortion:
+  - 0.0
+  - 0.0
+  - 0.0
+  - 0.0
+  - 0.0
+extrinsics:
+  recommended_method: BUNDLE_ADJUSTMENT
+  X_flange_cam:
+  - - 0.04070085093201509
+    - 0.9991513392022685
+    - 0.0063278830364862735
+    - 0.06440228953561053
+  - - -0.9991086187772665
+    - 0.0406264973067853
+    - 0.011465408913968175
+    - 0.031105218454055637
+  - - 0.011198598947753465
+    - -0.006788894379449913
+    - 0.999914247470608
+    - 0.022792526620610157
+  - - 0.0
+    - 0.0
+    - 0.0
+    - 1.0
+  flange_cam_mm_deg:
+  - 64.4023
+  - 31.1052
+  - 22.7925
+  - -0.389
+  - -0.6416
+  - -87.6672
+  flange_cam_m_rad:
+  - 0.0644022895
+  - 0.0311052185
+  - 0.0227925266
+  - -0.0067893723
+  - -0.011198833
+  - -1.5300816758
+  X_tcp_cam:
+  - - 0.04070085093201509
+    - 0.9991513392022685
+    - 0.0063278830364862735
+    - 0.06440228953561053
+  - - -0.9991086187772665
+    - 0.0406264973067853
+    - 0.011465408913968175
+    - 0.031105218454055637
+  - - 0.011198598947753465
+    - -0.006788894379449913
+    - 0.999914247470608
+    - -0.14920747337938983
+  - - 0.0
+    - 0.0
+    - 0.0
+    - 1.0
+  tcp_cam_mm_deg:
+  - 64.4023
+  - 31.1052
+  - -149.2075
+  - -0.389
+  - -0.6416
+  - -87.6672
+  tcp_cam_m_rad:
+  - 0.0644022895
+  - 0.0311052185
+  - -0.1492074734
+  - -0.0067893723
+  - -0.011198833
+  - -1.5300816758
+  X_base_board:
+  - - -0.006892220691329831
+    - 0.999976099135496
+    - -0.0005463073297523805
+    - 0.38459589534959354
+  - - -0.9999741184504256
+    - -0.00689107740003797
+    - 0.0020677237631160942
+    - 0.0037329168935260793
+  - - 0.002063909696637069
+    - 0.000560544398976246
+    - 0.9999977130307554
+    - -0.006463377668715602
+  - - 0.0
+    - 0.0
+    - 0.0
+    - 1.0
+  base_board_mm_deg:
+  - 384.5959
+  - 3.7329
+  - -6.4634
+  - 0.0321
+  - -0.1183
+  - -90.3949
+  tcp_offset_mm_rad:
+  - 0.0
+  - 0.0
+  - 172.0
+  - 0.0
+  - 0.0
+  - 0.0
+  ufactory_vision:
+    EULER_EEF_TO_COLOR_OPT:
+    - 0.0644022895
+    - 0.0311052185
+    - -0.1492074734
+    - -0.0067893723
+    - -0.011198833
+    - -1.5300816758
+    EULER_FLANGE_TO_COLOR_OPT:
+    - 0.0644022895
+    - 0.0311052185
+    - 0.0227925266
+    - -0.0067893723
+    - -0.011198833
+    - -1.5300816758
+    EULER_COLOR_TO_DEPTH_OPT:
+    - 0.0
+    - 0.0
+    - 0.0
+    - 0.0
+    - 0.0
+    - 0.0
+    camera_frame: color_optical_frame
+    depth_aligned_to_color: true
+    table_z_base_m: -0.008
+    board_thickness_m: 0.001
+metrics:
+  active_samples: 20
+  mean_mm: 1.571
+  max_mm: 3.569
+  mean_deg: 1.3966
+  max_deg: 3.7858
+  reprojection_rms_px: 1.478
+  rotation_coverage_deg:
+  - 15.51
+  - 7.98
+  - 6.55
+  board_check:
+    ok: true
+    board_z_mm: -6.463377668715602
+    expected_board_z_mm: -7.0
+    board_height_error_mm: 0.536622331284398
+    estimated_table_z_mm: -7.463377668715602
+    configured_table_z_mm: -8.0
+    board_thickness_mm: 1.0
+    tilt_deg: 0.12253717819705383
+  depth_check:
+    ok: true
+    points_count: 18195
+    plane_inliers: 17389
+    plane_inlier_ratio: 0.9557021159659247
+    table_z_median_mm: -1.057829749500916
+    configured_table_z_mm: -8.0
+    board_thickness_mm: 1.0
+    table_height_error_mm: 6.9421702504990845
+    normal_angle_deg: 0.9768245235416781
+methods_comparison:
+  TSAI:
+    flange_cam_mm_deg:
+    - 59.217
+    - 43.384
+    - 9.146
+    - -1.142
+    - 1.11
+    - -87.916
+    mean_mm: 3.055
+    max_mm: 6.476
+    mean_deg: 1.2646
+    rms_px: 4.262
+  PARK:
+    flange_cam_mm_deg:
+    - 59.565
+    - 42.846
+    - 9.235
+    - -1.095
+    - 1.005
+    - -88.383
+    mean_mm: 3.025
+    max_mm: 6.418
+    mean_deg: 1.2515
+    rms_px: 4.185
+  HORAUD:
+    flange_cam_mm_deg:
+    - 59.572
+    - 42.84
+    - 9.234
+    - -1.093
+    - 1.002
+    - -88.391
+    mean_mm: 3.025
+    max_mm: 6.417
+    mean_deg: 1.2513
+    rms_px: 4.183
+  ANDREFF:
+    flange_cam_mm_deg:
+    - 33.855
+    - 19.476
+    - 204.272
+    - -1.037
+    - 1.001
+    - -88.367
+    mean_mm: 31.295
+    max_mm: 54.672
+    mean_deg: 1.2514
+    rms_px: 49.475
+  DANIILIDIS:
+    flange_cam_mm_deg:
+    - 58.658
+    - 44.116
+    - 4.927
+    - -1.07
+    - 1.126
+    - -88.485
+    mean_mm: 3.644
+    max_mm: 7.545
+    mean_deg: 1.2551
+    rms_px: 5.243
+  SHAH:
+    flange_cam_mm_deg:
+    - 52.433
+    - 42.49
+    - 20.291
+    - -1.093
+    - 1.001
+    - -88.39
+    mean_mm: 3.107
+    max_mm: 6.29
+    mean_deg: 1.2512
+    rms_px: 3.518
+  LI:
+    flange_cam_mm_deg:
+    - 51.77
+    - 42.19
+    - -176.642
+    - -1.006
+    - 0.997
+    - -88.456
+    mean_mm: 295.545
+    max_mm: 318.962
+    mean_deg: 1.2499
+    rms_px: 177.234
+  BUNDLE_ADJUSTMENT:
+    flange_cam_mm_deg:
+    - 64.402
+    - 31.105
+    - 22.793
+    - -0.389
+    - -0.642
+    - -87.667
+    mean_mm: 1.571
+    max_mm: 3.569
+    mean_deg: 1.3966
+    rms_px: 1.478
+source:
+  project: camera_tool
+  file: result/eye_in_hand_d435.yaml
+  sha256: de8e31eaa6b9e2c0121ec5467ad22f1d99483d3218ef83fcb138a2c8fb34083f
+  rotation_order: Rz @ Ry @ Rx

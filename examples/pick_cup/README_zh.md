@@ -21,7 +21,9 @@ python -m examples.pick_cup --mode real --confirm-real        # 真机
 | `--cup-pose X Y YAW_DEG` | 杯底位置（m）与杯底→杯口偏航角。硬件模式下替代相机检测。 |
 | `--target-xy X Y` | 竖放目标点（m）。仿真默认 `(0.30, 0.15)`；硬件默认 `(0.38, -0.18)`，与纸杯距离小于 110 mm 时改用 `(0.38, 0.04)`。 |
 
-公共参数（`--mode`、`--headless`、`--ip`、`--calibration`、`--handeye`、`--camera-serial`、`--post-verify`、`--save-vis`、`--save-after-vis`、`--report`）及默认值见 [`config.yaml`](config.yaml)。
+公共参数（`--mode`、`--headless`、`--ip`、`--calibration`、`--handeye`、`--camera-type`、`--camera-serial`、`--post-verify`、`--save-vis`、`--save-after-vis`、`--report`）及默认值见 [`config.yaml`](config.yaml)。
+
+默认相机为 D435/D435i，1280×720@30。Gemini 305 使用 `--camera-type orbbec`（1280×800@30）。`camera.handeye` 留空时按相机类型选择；`--handeye` 可覆盖。实时采集为检测、复测和验证传递彩色内参，详见[相机配置](../../README_zh.md#硬件配置)。
 
 ## 流程
 
@@ -37,7 +39,7 @@ python -m examples.pick_cup --mode real --confirm-real        # 真机
 
 1. 读取关节状态并拍摄一帧 RGB-D。通过白色像素 + 高于桌面的深度分割纸杯，PCA 求杯轴，按两端宽度与高度区分杯底和杯口。
 2. 在加载标定的数字孪生中执行任务并记录关节路点。对生成的 50 Hz 轨迹逐点检查关节限位、碰撞、腕部相机离桌高度 ≥ 95 mm、相邻步关节变化 ≤ 0.15 rad。
-3. `sdk-sim` 在控制器仿真模式中回放轨迹；`real` 下发到真机（夹持开度 50–55 mm，速度 20 %，力 15 %）。
+3. `sdk-sim` 在控制器仿真模式中回放轨迹。相机引导的 `real` 抓取前，先将相机移到杯子正上方（D435 为 `360 mm`，Gemini 为 `280 mm`）复测，再运行完整标定数字孪生；杯子缺失或复测预演失败则退回观察位。开度读数无效或低于 30 mm 时在抬升前中止。夹持开度 58 mm，速度 10 %，力 5 %。
 4. 回到观测位后再拍一帧验证结果（纸杯像素 ≥ 1200，水平误差 ≤ 45 mm，杯口高度 ≥ 45 mm）。
 
 ## 文件
@@ -45,7 +47,7 @@ python -m examples.pick_cup --mode real --confirm-real        # 真机
 | 文件 | 内容 |
 | :--- | :--- |
 | `pick_cup.py` | `CupRobot`、`run_pick_cup`、命令行 |
-| `perception.py` | `detect_sideways_cup`、`verify_upright_cup`、可视化 |
+| `perception.py` | `detect_sideways_cup`、共享 `detect_single_cup_near`、`verify_upright_cup`、可视化 |
 | `sim2real.py` | 数字孪生预演、sdk-sim、真机执行 |
 | `scene.xml` | xArm 6 + G2、桌面、纸杯 |
 | `test_pick_cup.py` | `pytest examples/pick_cup` |

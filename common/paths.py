@@ -19,16 +19,26 @@ UFACTORY_MUJOCO_ROOT = WORKSPACE_ROOT / "ufactory_mujoco"
 
 DEFAULT_ROBOT_IP = "192.168.1.60"
 
-# Per-robot calibration files (not tracked by git, see calibration/README.md).
+# Calibration defaults; local per-robot files are ignored (see calibration/README.md).
 CALIBRATION_DIR = REPO_ROOT / "calibration"
 DEFAULT_CALIBRATION_YAML = CALIBRATION_DIR / "xarm6_kinematics.yaml"
-DEFAULT_HANDEYE_YAML = CALIBRATION_DIR / "eye_in_hand.yaml"
+ORBBEC_HANDEYE_YAML = CALIBRATION_DIR / "eye_in_hand.yaml"
+DEFAULT_HANDEYE_YAML = CALIBRATION_DIR / "eye_in_hand.d435.yaml"
 
 # Sample calibration files used by the tests (no hardware needed).
 SAMPLE_CALIBRATION_YAML = UFACTORY_MUJOCO_ROOT / "calibrations" / "xarm6_kinematics_L56A01.yaml"
 SAMPLE_HANDEYE_YAML = CALIBRATION_DIR / "eye_in_hand.example.yaml"
 
 BUILD_DIR = REPO_ROOT / "build"
+
+
+def default_handeye_path(camera_type: str = "realsense") -> Path:
+    """Select the installed hand-eye file for the requested camera family."""
+    if camera_type == "realsense":
+        return DEFAULT_HANDEYE_YAML
+    if camera_type == "orbbec":
+        return ORBBEC_HANDEYE_YAML
+    raise ValueError(f"Unsupported camera type: {camera_type!r}")
 
 
 def ensure_ufactory_mujoco() -> None:

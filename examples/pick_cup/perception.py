@@ -12,20 +12,27 @@ import cv2
 import numpy as np
 
 from common.objects import paper_cup
+from common.objects.cup_perception import (
+    detect_single_cup_near,
+    estimate_sideways_cup_component,
+    project_component_silhouette_xy,
+)
 from common.objects.paper_cup import (
-    CUP_HALF_CONE_RAD,
     CUP_HEIGHT_M,
     CupPoseEstimate,
-    sideways_cup_mujoco_pose,
 )
 from common.paths import DEFAULT_HANDEYE_YAML
 from common.vision import (
     PerceptionError,
     capture_rgbd_frame,
+    component_touches_fov_boundary,
+    cup_overview_fov,
     deproject_pixels_to_cam,
     load_handeye_calibration,
     project_cam_to_pixels,
+    resolve_camera_config,
     validate_xy_in_workspace,
+    white_cup_mask,
 )
 
 __all__ = [
@@ -35,9 +42,11 @@ __all__ = [
     "UprightCupVerification",
     "capture_rgbd_frame",
     "detect_sideways_cup",
+    "detect_single_cup_near",
     "pose_estimate_from_manual",
     "save_detection_overlay",
     "save_post_place_overlay",
+    "validate_xy_in_workspace",
     "verify_upright_cup",
 ]
 
@@ -96,11 +105,12 @@ def detect_sideways_cup(
     t_base_flange: np.ndarray,
     *,
     handeye_yaml: str | Path = DEFAULT_HANDEYE_YAML,
+    camera_metadata: dict[str, Any] | None = None,
     workspace_bounds: dict[str, float] = WORKSPACE_BOUNDS_M,
 ) -> tuple[CupPoseEstimate, dict[str, Any]]:
     """Segment the white sideways paper cup and estimate its 6D pose in the robot base frame."""
     handeye = load_handeye_calibration(handeye_yaml)
-    cam_cfg = handeye["camera"]
+    cam_cfg = resolve_camera_config(handeye, color_bgr, depth_m, camera_metadata)
     x_flange_cam = np.asarray(handeye["extrinsics"]["X_flange_cam"], dtype=np.float64)
     t_base_cam = np.asarray(t_base_flange, dtype=np.float64).reshape(4, 4) @ x_flange_cam
 
@@ -110,17 +120,14 @@ def detect_sideways_cup(
     h, w = depth_m.shape
     ys, xs = np.mgrid[0:h, 0:w]
     # Exclude bottom gripper housing/fingers visible in the lower FOV
-    fov_mask = (
-        (ys >= int(0.18 * h)) & (ys < int(0.73 * h)) & (xs >= int(0.18 * w)) & (xs < int(0.92 * w))
-    )
+    fov_mask = cup_overview_fov(h, w, cam_cfg)
     depth_valid = np.isfinite(depth_m) & (depth_m > 0.15) & (depth_m < 0.75) & fov_mask
     if int(np.count_nonzero(depth_valid)) < 500:
         raise PerceptionError("Not enough valid depth pixels to locate the table or cup")
 
     # White cup candidate mask in HSV
     hsv = cv2.cvtColor(color_bgr, cv2.COLOR_BGR2HSV)
-    is_green = (hsv[:, :, 0] >= 65) & (hsv[:, :, 0] <= 105) & (hsv[:, :, 1] >= 25)
-    white_mask = (~is_green) & (hsv[:, :, 1] < 75) & (hsv[:, :, 2] > 155) & fov_mask
+    white_mask = white_cup_mask(hsv, cam_cfg) & fov_mask
     white_u8 = cv2.morphologyEx(
         white_mask.astype(np.uint8) * 255,
         cv2.MORPH_OPEN,
@@ -131,10 +138,14 @@ def detect_sideways_cup(
     best_label = -1
     best_pts_base: np.ndarray | None = None
     best_table_z = 0.0
+    clipped_cup = False
 
     for label_idx in range(1, num_labels):
         area = int(stats[label_idx, cv2.CC_STAT_AREA])
         if area < 600:
+            continue
+        if component_touches_fov_boundary(labels == label_idx, fov_mask):
+            clipped_cup = True
             continue
         comp_mask = (labels == label_idx) & depth_valid
         if int(np.count_nonzero(comp_mask)) < 250:
@@ -175,6 +186,10 @@ def detect_sideways_cup(
             best_table_z = local_table_z
 
     if best_pts_base is None or best_label < 0:
+        if clipped_cup:
+            raise PerceptionError(
+                "Cup is clipped by the detection field of view; raise the observation pose or reposition the cup"
+            )
         raise PerceptionError("No white paper cup detected inside the workspace")
 
     if abs(best_table_z) > 0.030:
@@ -182,74 +197,22 @@ def detect_sideways_cup(
             f"Unexpected local table height ({best_table_z * 1000:.1f} mm); check the hand-eye calibration or camera pose"
         )
 
-    # 2D PCA in XY plane to find primary cup axis
-    xy = best_pts_base[:, :2]
-    center_xy = xy.mean(axis=0)
-    _, _, vt = np.linalg.svd(xy - center_xy, full_matrices=False)
-    axis_xy = vt[0].copy()
-    ortho_xy = np.array([-axis_xy[1], axis_xy[0]], dtype=np.float64)
-
-    proj_along = (xy - center_xy) @ axis_xy
-    proj_ortho = (xy - center_xy) @ ortho_xy
-    p_min, p_max = np.percentile(proj_along, [2.0, 98.0])
-    length_mm = float((p_max - p_min) * 1000.0)
-
-    q35, q65 = np.percentile(proj_along, [35.0, 65.0])
-    mask_neg = proj_along <= q35
-    mask_pos = proj_along >= q65
-    width_neg = float(
-        (np.percentile(proj_ortho[mask_neg], 95.0) - np.percentile(proj_ortho[mask_neg], 5.0))
-        * 1000.0
+    silhouette_xy = project_component_silhouette_xy(
+        labels == best_label,
+        cam_cfg,
+        t_base_cam,
+        best_table_z,
     )
-    width_pos = float(
-        (np.percentile(proj_ortho[mask_pos], 95.0) - np.percentile(proj_ortho[mask_pos], 5.0))
-        * 1000.0
+    estimate = estimate_sideways_cup_component(
+        best_pts_base,
+        best_table_z,
+        workspace_bounds,
+        silhouette_xy=silhouette_xy,
+        strict_dimensions=False,
+        raise_on_workspace=True,
     )
-    z_neg = float(np.percentile(best_pts_base[mask_neg, 2] - best_table_z, 90.0) * 1000.0)
-    z_pos = float(np.percentile(best_pts_base[mask_pos, 2] - best_table_z, 90.0) * 1000.0)
-
-    # The top rim (75 mm) is wider and higher above the table than the bottom (53 mm)
-    score_pos_is_top = (width_pos - width_neg) + 0.5 * (z_pos - z_neg)
-    if score_pos_is_top < 0.0:
-        axis_xy = -axis_xy
-        ortho_xy = -ortho_xy
-        proj_along = -proj_along
-        p_min, p_max = -p_max, -p_min
-        width_bot_mm, width_top_mm = width_pos, width_neg
-    else:
-        width_bot_mm, width_top_mm = width_neg, width_pos
-
-    mid_along = 0.5 * (p_min + p_max)
-    mid_xy = center_xy + mid_along * axis_xy
-    half_horiz_len = 0.5 * CUP_HEIGHT_M * float(np.cos(CUP_HALF_CONE_RAD))
-    bot_xy = mid_xy - half_horiz_len * axis_xy
-    top_xy = mid_xy + half_horiz_len * axis_xy
-    grasp_xy = bot_xy + 0.040 * axis_xy
-    validate_xy_in_workspace(grasp_xy, "Detected cup grasp center", workspace_bounds)
-
-    yaw_deg = float(np.rad2deg(np.arctan2(axis_xy[1], axis_xy[0])))
-    # Use the calibrated base-frame table plane (Z = 0.0 m) for MuJoCo and grasp/place heights
-    pos_m, quat_wxyz = sideways_cup_mujoco_pose(bot_xy, yaw_deg, table_z_m=0.0)
-
-    estimate = CupPoseEstimate(
-        cup_center_xy_m=(float(mid_xy[0]), float(mid_xy[1])),
-        cup_bottom_xy_m=(float(bot_xy[0]), float(bot_xy[1])),
-        cup_top_xy_m=(float(top_xy[0]), float(top_xy[1])),
-        table_z_m=0.0,
-        yaw_deg=yaw_deg,
-        mujoco_pos_m=(float(pos_m[0]), float(pos_m[1]), float(pos_m[2])),
-        mujoco_quat_wxyz=(
-            float(quat_wxyz[0]),
-            float(quat_wxyz[1]),
-            float(quat_wxyz[2]),
-            float(quat_wxyz[3]),
-        ),
-        length_mm=length_mm,
-        width_bot_mm=width_bot_mm,
-        width_top_mm=width_top_mm,
-        point_count=len(best_pts_base),
-        source="camera",
-    )
+    if estimate is None:
+        raise PerceptionError("No white paper cup detected inside the workspace")
 
     debug_info = {
         "mask": labels == best_label,
@@ -347,11 +310,12 @@ def verify_upright_cup(
     target_xy_m: tuple[float, float] | np.ndarray,
     *,
     handeye_yaml: str | Path = DEFAULT_HANDEYE_YAML,
+    camera_metadata: dict[str, Any] | None = None,
     table_z_m: float = 0.0,
 ) -> tuple[UprightCupVerification, dict[str, Any]]:
     """Verify via Eye-in-Hand RGB-D that the paper cup stands upright at target_xy_m."""
     handeye = load_handeye_calibration(handeye_yaml)
-    cam_cfg = handeye["camera"]
+    cam_cfg = resolve_camera_config(handeye, color_bgr, depth_m, camera_metadata)
     x_flange_cam = np.asarray(handeye["extrinsics"]["X_flange_cam"], dtype=np.float64)
     t_base_cam = np.asarray(t_base_flange, dtype=np.float64).reshape(4, 4) @ x_flange_cam
     t_cam_base = np.eye(4, dtype=np.float64)
@@ -385,9 +349,10 @@ def verify_upright_cup(
 
     roi_mask = np.zeros((h, w), dtype=np.uint8)
     cv2.fillConvexPoly(roi_mask, hull, 255)
-    # Exclude lower gripper housing and fingers (either by depth < 0.24m or bottom image band)
+    # Exclude lower gripper housing and fingers (depth < 0.24m, plus Gemini's bottom image band)
     roi_bool = roi_mask > 0
-    roi_bool[int(0.80 * h) :, :] = False
+    if cam_cfg.get("type") != "realsense":
+        roi_bool[int(0.80 * h) :, :] = False
     if depth_m is not None and depth_m.shape == (h, w):
         near_gripper = (depth_m > 0.05) & (depth_m < 0.24)
         near_gripper_dilated = (
@@ -396,7 +361,11 @@ def verify_upright_cup(
         roi_bool &= ~near_gripper_dilated
 
     hsv = cv2.cvtColor(color_bgr, cv2.COLOR_BGR2HSV)
-    cup_mask = (hsv[:, :, 1] < 95) & (hsv[:, :, 2] > 145) & roi_bool
+    cup_mask = (
+        white_cup_mask(hsv, cam_cfg, value=145)
+        if cam_cfg.get("type") == "realsense"
+        else (hsv[:, :, 1] < 95) & (hsv[:, :, 2] > 145)
+    ) & roi_bool
     cup_u8 = cv2.morphologyEx(
         cup_mask.astype(np.uint8) * 255,
         cv2.MORPH_OPEN,

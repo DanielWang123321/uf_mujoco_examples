@@ -31,6 +31,7 @@ from ufactory_mujoco.safety import (
 )
 from ufactory_mujoco.xarm_robot import XArmRobot
 
+from common.camera import CameraStream, create_camera_stream
 from common.motion import (
     interpolate_waypoint_chain,
     read_real_gripper_gap_mm,
@@ -42,13 +43,22 @@ from common.paths import (
     DEFAULT_HANDEYE_YAML,
     DEFAULT_ROBOT_IP,
 )
-from common.sim2real import config_sha256, flange_pose, make_collision_checker, write_json_report
+from common.sim2real import (
+    camera_run_context,
+    config_sha256,
+    flange_pose,
+    make_collision_checker,
+    pipeline_error_report,
+    record_camera_frame,
+    save_rgbd_capture,
+    verify_controller_tcp_offset_and_fk,
+    write_json_report,
+)
 from common.vision import solve_camera_lookdown_q as _solve_camera_lookdown_q
 
 from . import screw_nut as task
 from .perception import (
     NutPoseEstimate,
-    OrbbecCameraStream,
     ScrewPoseEstimate,
     capture_rgbd_frame,
     detect_nut_and_screw_overview,
@@ -64,6 +74,7 @@ from .perception import (
 MIN_CAMERA_TABLE_CLEARANCE_M = 0.088
 MAX_JOINT_STEP_RAD = 0.15
 CAM_HOVER_Z_M = 0.250
+CAM_HOVER_Z_REALSENSE_M = 0.330
 MIN_VALID_NUT_GRASP_GAP_MM = 12.0  # below: empty grasp
 MAX_HEX_FLAT_GAP_MM = 21.2  # above at regrip: fingers are on the 29 mm flange, not the hex
 MIN_VALID_NUT_OPEN_GAP_MM = 42.0  # the gripper must clear the 29 mm flange before the J6 rewind
@@ -378,7 +389,8 @@ def run_sim2real_pipeline(
     thread_turns: float = task.DEFAULT_THREAD_TURNS,
     ip: str = DEFAULT_ROBOT_IP,
     calibration_path: str | Path = DEFAULT_CALIBRATION_YAML,
-    handeye_path: str | Path = DEFAULT_HANDEYE_YAML,
+    handeye_path: str | Path | None = None,
+    camera_type: str = "realsense",
     camera_serial: str = "",
     nut_pose_override: tuple[float, float, float] | None = None,
     screw_xy_override: tuple[float, float] | None = None,
@@ -395,23 +407,40 @@ def run_sim2real_pipeline(
         raise ValueError(f"Unsupported hardware mode: {mode!r}")
     enforce_single_cycle(cycles, mode)
 
+    handeye_path, camera_context = camera_run_context(camera_type, handeye_path)
+    result_payload: dict[str, Any] = {
+        "mode": mode,
+        "ok": False,
+        "completed": False,
+        **camera_context,
+    }
     calib = load_kinematics_calibration(calibration_path, robot="xarm6")
 
-    with XArmRobot(
-        ip,
-        robot="xarm6",
-        gripper="gripper_g2",
-        model_path=task.SCENE,
-        calibration=calib,
-        read_only=True,
-    ) as robot:
+    with (
+        pipeline_error_report(report_path, result_payload),
+        XArmRobot(
+            ip,
+            robot="xarm6",
+            gripper="gripper_g2",
+            model_path=task.SCENE,
+            calibration=calib,
+            read_only=True,
+        ) as robot,
+    ):
+        tcp_check = verify_controller_tcp_offset_and_fk(robot)
+        result_payload["controller_tcp_check"] = tcp_check
+        print(
+            f"[kinematics] SDK tcp_offset={tcp_check['tcp_offset_mm_rad']} (mm, rad), "
+            f"FK flange error={tcp_check['fk_flange_pos_error_mm']:.3f} mm / "
+            f"{tcp_check['fk_flange_rot_error_deg']:.4f} deg",
+            flush=True,
+        )
         q_obs = robot.get_joint_positions()
         t_base_flange = flange_pose(robot.model, robot.data)
 
         color_bgr: np.ndarray | None = None
         debug_info: dict[str, Any] = {}
-        cam_stream: OrbbecCameraStream | None = None
-        result_payload: dict[str, Any] = {"mode": mode, "ok": False}
+        cam_stream: CameraStream | None = None
         try:
             # 1. Perception: manual poses or one overview frame.
             if nut_pose_override is not None and screw_xy_override is not None:
@@ -428,12 +457,20 @@ def run_sim2real_pipeline(
                 )
             else:
                 if mode == "real":
-                    cam_stream = OrbbecCameraStream(camera_serial)
+                    cam_stream = create_camera_stream(camera_type, camera_serial)
                     cam_stream.start()
                 print("[perception] capturing the overview RGB-D frame ...", flush=True)
-                color_bgr, depth_m, _ = capture_rgbd_frame(serial=camera_serial, stream=cam_stream)
+                color_bgr, depth_m, camera_meta = capture_rgbd_frame(
+                    camera_type=camera_type, serial=camera_serial, stream=cam_stream
+                )
+                record_camera_frame(camera_context, "overview", camera_meta, t_base_flange)
+                save_rgbd_capture(save_vis_path, color_bgr, depth_m, camera_meta, t_base_flange)
                 nut_est, screw_est, debug_info = detect_nut_and_screw_overview(
-                    color_bgr, depth_m, t_base_flange, handeye_yaml=handeye_path
+                    color_bgr,
+                    depth_m,
+                    t_base_flange,
+                    camera_metadata=camera_meta,
+                    handeye_yaml=handeye_path,
                 )
                 print(
                     f"[perception] nut=({nut_est.xy_m[0]:.4f}, {nut_est.xy_m[1]:.4f}) m "
@@ -464,6 +501,7 @@ def run_sim2real_pipeline(
                 handeye_yaml=handeye_path,
                 headless=headless,
             )
+            result_payload["digital_twin"] = twin_report.as_dict()
             if not twin_report.ok:
                 raise SafetyGateError(
                     f"Digital-twin preflight failed; hardware motion blocked: "
@@ -486,22 +524,27 @@ def run_sim2real_pipeline(
                     "screw_pose": screw_est.as_dict(),
                     "thread_turns": float(thread_turns),
                     "calibration_sha256": calib.sha256,
+                    "tcp_offset_mm_rad": tcp_check["tcp_offset_mm_rad"],
+                    **camera_context,
                 }
             )
-            result_payload = {
-                "mode": mode,
-                "robot": "xarm6",
-                "gripper": "gripper_g2",
-                "thread_turns": float(thread_turns),
-                "serial_number": robot.serial_number,
-                "calibration_sha256": calib.sha256,
-                "config_sha256": cfg_hash,
-                "program_sha256": prog_hash,
-                "digital_twin": twin_report.as_dict(),
-                "ok": True,
-                "success": True,
-                "completed": True,
-            }
+            result_payload.update(
+                {
+                    "mode": mode,
+                    "robot": "xarm6",
+                    "gripper": "gripper_g2",
+                    "thread_turns": float(thread_turns),
+                    "serial_number": robot.serial_number,
+                    "calibration_sha256": calib.sha256,
+                    **camera_context,
+                    "config_sha256": cfg_hash,
+                    "program_sha256": prog_hash,
+                    "digital_twin": twin_report.as_dict(),
+                    "ok": True,
+                    "success": True,
+                    "completed": True,
+                }
+            )
 
             if mode == "dry-run":
                 write_json_report(report_path, result_payload)
@@ -551,6 +594,8 @@ def run_sim2real_pipeline(
                 q_obs=q_obs,
                 cam_stream=cam_stream,
                 camera_serial=camera_serial,
+                camera_type=camera_type,
+                camera_context=camera_context,
                 thread_turns=thread_turns,
                 handeye_path=handeye_path,
                 confirm_real=confirm_real,
@@ -558,6 +603,7 @@ def run_sim2real_pipeline(
                 cfg_hash=cfg_hash,
                 prog_hash=prog_hash,
                 post_verify=post_verify,
+                save_vis_path=save_vis_path,
                 save_after_vis_path=save_after_vis_path,
                 report_path=report_path,
             )
@@ -603,8 +649,10 @@ def _execute_real(
     screw_est: ScrewPoseEstimate,
     use_lookdown: bool,
     q_obs: np.ndarray,
-    cam_stream: OrbbecCameraStream | None,
+    cam_stream: CameraStream | None,
     camera_serial: str,
+    camera_type: str,
+    camera_context: dict[str, Any],
     thread_turns: float,
     handeye_path: str | Path,
     confirm_real: bool,
@@ -612,6 +660,7 @@ def _execute_real(
     cfg_hash: str,
     prog_hash: str,
     post_verify: bool,
+    save_vis_path: str | Path | None,
     save_after_vis_path: str | Path | None,
     report_path: str | Path | None,
 ) -> dict[str, Any]:
@@ -630,11 +679,20 @@ def _execute_real(
             time.sleep(settle_s)
         return read_real_gripper_gap_mm(robot)
 
-    def capture() -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    def capture(stage: str) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict[str, Any]]:
         robot.get_joint_positions()  # refresh robot.data
         t_bf = flange_pose(robot.model, robot.data)
-        bgr, depth, _ = capture_rgbd_frame(serial=camera_serial, stream=cam_stream)
-        return bgr, depth, t_bf
+        bgr, depth, frame_meta = capture_rgbd_frame(
+            camera_type=camera_type, serial=camera_serial, stream=cam_stream
+        )
+        record_camera_frame(camera_context, stage, frame_meta, t_bf)
+        image_path = (
+            save_after_vis_path
+            if stage == "post_task"
+            else (Path(save_vis_path).with_name(stage + ".png") if save_vis_path else None)
+        )
+        save_rgbd_capture(image_path, bgr, depth, frame_meta, t_bf)
+        return bgr, depth, t_bf, frame_meta
 
     approval = authorize_real_motion(
         robot._arm,
@@ -658,14 +716,19 @@ def _execute_real(
     active_wps = twin_report.waypoints
     refined_log: dict[str, Any] = {}
 
+    cam_hover_z_m = CAM_HOVER_Z_REALSENSE_M if camera_type == "realsense" else CAM_HOVER_Z_M
     if use_lookdown:
         # 1. Re-measure the nut from directly above.
         q_cam_nut = solve_camera_lookdown_q(
-            nut_est.xy_m, q_seed=q_obs, calibration=calib, handeye_yaml=handeye_path
+            nut_est.xy_m,
+            z_cam_m=cam_hover_z_m,
+            q_seed=q_obs,
+            calibration=calib,
+            handeye_yaml=handeye_path,
         )
-        log(f"  [1/6] look-down measurement of the nut (camera z={CAM_HOVER_Z_M * 1000:.0f} mm)")
+        log(f"  [1/6] look-down measurement of the nut (camera z={cam_hover_z_m * 1000:.0f} mm)")
         stream_waypoints_on_real(robot, [q_cam_nut], soft_landing=True)
-        nut_bgr, nut_depth, t_bf_nut = capture()
+        nut_bgr, nut_depth, t_bf_nut, nut_meta = capture("near_nut")
         refined_nut, nut_dbg = detect_nut_near(
             nut_bgr,
             nut_depth,
@@ -673,6 +736,7 @@ def _execute_real(
             nut_est.xy_m,
             search_radius_m=0.080,
             exclude_xy_m=screw_est.xy_m,
+            camera_metadata=nut_meta,
             handeye_yaml=handeye_path,
         )
         if refined_nut is None:
@@ -689,11 +753,15 @@ def _execute_real(
 
         # 2. Re-measure the fixed screw from directly above.
         q_cam_screw = solve_camera_lookdown_q(
-            screw_est.xy_m, q_seed=q_cam_nut, calibration=calib, handeye_yaml=handeye_path
+            screw_est.xy_m,
+            z_cam_m=cam_hover_z_m,
+            q_seed=q_cam_nut,
+            calibration=calib,
+            handeye_yaml=handeye_path,
         )
-        log(f"  [2/6] look-down measurement of the screw (camera z={CAM_HOVER_Z_M * 1000:.0f} mm)")
+        log(f"  [2/6] look-down measurement of the screw (camera z={cam_hover_z_m * 1000:.0f} mm)")
         stream_waypoints_on_real(robot, [q_cam_screw], soft_landing=True)
-        screw_bgr, screw_depth, t_bf_screw = capture()
+        screw_bgr, screw_depth, t_bf_screw, screw_meta = capture("near_screw")
         q_hover_screw = robot.get_joint_positions()
         refined_screw, screw_dbg = detect_screw_near(
             screw_bgr,
@@ -702,6 +770,7 @@ def _execute_real(
             screw_est.xy_m,
             search_radius_m=0.080,
             exclude_xy_m=refined_nut.xy_m,
+            camera_metadata=screw_meta,
             handeye_yaml=handeye_path,
         )
         if refined_screw is None:
@@ -956,11 +1025,15 @@ def _execute_real(
     post_ok = True
     if post_verify:
         q_cam_after = solve_camera_lookdown_q(
-            screw_est.xy_m, q_seed=q_obs, calibration=calib, handeye_yaml=handeye_path
+            screw_est.xy_m,
+            z_cam_m=cam_hover_z_m,
+            q_seed=q_obs,
+            calibration=calib,
+            handeye_yaml=handeye_path,
         )
         log("[verify] moving the camera above the screw to check the result")
         stream_waypoints_on_real(robot, [q_cam_after], soft_landing=True)
-        after_bgr, after_depth, t_bf_after = capture()
+        after_bgr, after_depth, t_bf_after, after_meta = capture("post_task")
         expected_bottom_mm = float(
             twin_report.metrics.get("expected_nut_z_mm", task.SCREW_HEAD_LEN_M * 1000.0)
         )
@@ -971,6 +1044,7 @@ def _execute_real(
             screw_est.xy_m,
             initial_nut_xy_m=nut_est.xy_m,
             expected_nut_bottom_z_mm=expected_bottom_mm,
+            camera_metadata=after_meta,
             handeye_yaml=handeye_path,
             table_z_m=screw_est.table_z_m,
         )

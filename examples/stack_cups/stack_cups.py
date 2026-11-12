@@ -315,6 +315,7 @@ def run_stack_cups(
     target_xy: np.ndarray | None = None,
     q_init: np.ndarray | None = None,
     recorded_cycles: list[CupCycleWaypoints] | None = None,
+    grasp_yaw_offset_rad: float = 0.0,
 ) -> dict[str, Any]:
     """Pick, flip 90 degrees, and coaxially nest ``num_cups`` cups. Cups move only via contacts.
 
@@ -367,7 +368,7 @@ def run_stack_cups(
         approach[2] = table_z + 0.16
 
         axis_yaw_rad = float(np.arctan2(axis[1], axis[0]))
-        grasp_quat = yaw_rotate_quat(axis_yaw_rad, GRIP_DOWN_QUAT)
+        grasp_quat = yaw_rotate_quat(axis_yaw_rad + grasp_yaw_offset_rad, GRIP_DOWN_QUAT)
 
         print(f"{tag} Approach the body of {cup_name}", flush=True)
         robot.active_waypoint_sink = cycle_wps.approach_waypoints
@@ -379,7 +380,7 @@ def run_stack_cups(
             raise TaskError(f"IK did not converge for the {cup_name} approach pose {approach}")
         robot.move_joints(q_app[: robot.n_arm], 2.2, wait=False)
         robot.check_viewer()
-        move_tcp_checked(robot, grasp, grasp_quat, 1.8, steps=30, wait=True)
+        move_tcp_checked(robot, grasp, grasp_quat, 1.8, steps=30, wait=True, soft_landing=True)
         robot.active_waypoint_sink = None
 
         print(f"{tag} Grasp {cup_name}: confirm bilateral contact", flush=True)
@@ -445,7 +446,7 @@ def run_stack_cups(
                     (table_z + target_z_touch) - bottom[2],
                 ]
             )
-            move_tcp_checked(robot, destination, quat, 2.2, steps=35, wait=True)
+            move_tcp_checked(robot, destination, quat, 2.2, steps=35, wait=True, soft_landing=True)
             cycle_wps.grasp_gap_mm = float(robot.g2_controller.position_mm[0])
 
             if not _contact_between(robot, "table", _cup_bottom_geom(cup_name)):
@@ -455,10 +456,12 @@ def run_stack_cups(
                     position
                     + np.r_[
                         active_target_xy - bottom[:2],
-                        (table_z - 0.0005) - bottom[2],
+                        (table_z - 0.0008) - bottom[2],
                     ]
                 )
-                move_tcp_checked(robot, destination, quat, 0.8, steps=12, wait=True)
+                move_tcp_checked(
+                    robot, destination, quat, 0.8, steps=12, wait=True, soft_landing=True
+                )
             robot.active_waypoint_sink = None
             if not _contact_between(robot, "table", _cup_bottom_geom(cup_name)):
                 raise TaskError(f"Place failed: {cup_name} bottom does not touch the table")
@@ -498,7 +501,7 @@ def run_stack_cups(
                     (prev_rim_z - NEST_INSERT_DEPTH_M) - bottom[2],
                 ]
             )
-            move_tcp_checked(robot, insert_dest, quat, 2.2, steps=35, wait=True)
+            move_tcp_checked(robot, insert_dest, quat, 2.2, steps=35, wait=True, soft_landing=True)
             cycle_wps.grasp_gap_mm = float(robot.g2_controller.position_mm[0])
             robot.active_waypoint_sink = None
 
@@ -518,7 +521,9 @@ def run_stack_cups(
 
         robot.active_waypoint_sink = cycle_wps.retreat_waypoints
         position, quat = robot.get_tcp_pose()
-        retreat_pos = position + np.array([0.0, -0.095 * place_side, 0.015], dtype=np.float64)
+        retreat_pos = position + np.array(
+            [0.0, -0.095 * place_side * np.cos(grasp_yaw_offset_rad), 0.015], dtype=np.float64
+        )
         move_tcp_checked(robot, retreat_pos, quat, 1.5, steps=22, wait=False)
         move_tcp_checked(
             robot, retreat_pos + np.array([0.0, 0.0, 0.10]), quat, 1.4, steps=20, wait=True
@@ -590,7 +595,7 @@ def _run(args) -> None:
     if opts.mode == "sim":
         if args.target_xy is not None:
             target_xy = np.asarray(args.target_xy, dtype=np.float64)
-        elif "target_xy" in task_cfg:
+        elif task_cfg.get("target_xy") is not None:
             target_xy = np.asarray(task_cfg["target_xy"], dtype=np.float64)
         else:
             target_xy = DEFAULT_TARGET_XY.copy()
@@ -645,6 +650,7 @@ def _run(args) -> None:
         ip=opts.ip,
         calibration_path=opts.calibration_path,
         handeye_path=opts.handeye_path,
+        camera_type=opts.camera_type,
         camera_serial=opts.camera_serial,
         cup_poses_override=args.cup_poses,
         target_xy_override=target_override,

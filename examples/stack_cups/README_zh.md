@@ -22,7 +22,9 @@ python -m examples.stack_cups --mode real --confirm-real      # 真机
 | `--target-xy X Y` | 堆叠位置（m），默认 `task.target_xy`。硬件模式下若未指定，则自动选择距所有纸杯 ≥ 110 mm 的空位。 |
 | `--cup-poses X1 Y1 YAW1 ...` | 各纸杯杯底位置（m）及杯底→杯口朝向。硬件模式下指定后不使用相机识别。 |
 
-公共参数（`--mode`、`--headless`、`--ip`、`--calibration`、`--handeye`、`--camera-serial`、`--post-verify`、`--save-vis`、`--save-after-vis`、`--report`）及默认值见 [`config.yaml`](config.yaml)。
+公共参数（`--mode`、`--headless`、`--ip`、`--calibration`、`--handeye`、`--camera-type`、`--camera-serial`、`--post-verify`、`--save-vis`、`--save-after-vis`、`--report`）及默认值见 [`config.yaml`](config.yaml)。
+
+默认相机为 D435/D435i，1280×720@30。Gemini 305 使用 `--camera-type orbbec`（1280×800@30）。`camera.handeye` 留空时按相机类型选择；`--handeye` 可覆盖。实时采集为检测、复测和验证传递彩色内参，详见[相机配置](../../README_zh.md#硬件配置)。
 
 ## 原理
 
@@ -40,7 +42,7 @@ python -m examples.stack_cups --mode real --confirm-real      # 真机
 1. 采集一帧 RGB-D，识别所有白色侧卧纸杯（PCA 求杯轴，按宽度和高度区分杯底/杯口），按从右（−Y）到左（+Y）的顺序夹取。
 2. 在加载标定参数的数字孪生中运行全部流程。对 50 Hz 关节轨迹的每个采样点检查关节限位、碰撞、腕部相机距桌面 ≥ 95 mm、关节步长 ≤ 0.15 rad。
 3. `sdk-sim` 在控制器仿真模式中回放轨迹。`real` 模式：
-   - 每次夹取前，相机移动到纸杯正上方 280 mm 处重新测量并重新规划夹取；纸杯不见则回到初始位姿；
+   - 每次夹取前，相机移动到纸杯正上方（D435 为 `360 mm`，Gemini 为 `280 mm`）重新测量并重新规划夹取；纸杯不见则回到初始位姿；
    - 实测夹持开度 < 30 mm（空抓）则中止并回到初始位姿。
 4. 返回后再拍一帧确认堆叠结果（纸杯像素 ≥ 1200，水平误差 ≤ 45 mm，杯口高度 ≥ 50 mm，纸杯原位置已空）。
 

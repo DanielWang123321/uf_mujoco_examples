@@ -22,10 +22,13 @@ The following third-party material is used or referenced:
 
 4. camera_tool - https://github.com/DanielWang123321/camera_tool
    License: MIT (Copyright (c) 2026 UFACTORY Camera Calibration Contributors)
-   Used for: reference for the Orbbec capture code in common/camera.py.
+   Used for: reference for RGB-D capture in common/camera.py and D435i hand-eye calibration in
+   calibration/eye_in_hand.d435.yaml.
 
 Runtime dependencies (installed separately, not redistributed): MuJoCo (Apache-2.0),
-NumPy, SciPy, OpenCV, PyYAML, xArm-Python-SDK (BSD-3-Clause), and pyorbbecsdk (Apache-2.0).
+NumPy, SciPy, OpenCV, PyYAML, xArm-Python-SDK (BSD-3-Clause), pyrealsense2 (Apache-2.0), and
+pyorbbecsdk (Apache-2.0).
 
-Trademarks: xArm, Gripper G2, and UFACTORY are trademarks of UFACTORY. Orbbec and Gemini are
-trademarks of Orbbec Inc. They are used here to describe hardware compatibility only.
+Trademarks: xArm, Gripper G2, and UFACTORY are trademarks of UFACTORY. Intel and RealSense are
+trademarks of Intel Corporation or its subsidiaries. Orbbec and Gemini are trademarks of Orbbec
+Inc. They are used here to describe hardware compatibility only.

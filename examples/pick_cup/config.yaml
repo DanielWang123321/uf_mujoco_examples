@@ -7,8 +7,9 @@ robot:
   calibration: "calibration/xarm6_kinematics.yaml"   # see calibration/README.md
 
 camera:
-  handeye: "calibration/eye_in_hand.yaml"           # see calibration/README.md
-  serial: ""        # Orbbec serial number; empty: first camera found
+  type: realsense   # realsense: D435/D435i 1280x720@30; orbbec: Gemini 305 1280x800@30
+  handeye: null      # null: select by type; explicit path overrides the default
+  serial: ""        # SDK serial number; empty: first camera found
 
 task:
   post_verify: true   # after a real run, re-capture the scene and verify the upright cup
